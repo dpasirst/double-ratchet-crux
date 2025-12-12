@@ -98,14 +98,14 @@ pub struct Header<PublicKey> {
 }
 
 impl<PK: AsRef<[u8]>> Header<PK> {
-    ///
+    /// Extend into bytes
     pub fn extend_bytes_into(&self, v: &mut Vec<u8>) {
         v.extend_from_slice(self.dh.as_ref());
         v.extend_from_slice(&self.pn.to_be_bytes());
         v.extend_from_slice(&self.n.to_be_bytes());
     }
 
-    ///
+    /// As reference
     pub fn as_ref(&self) -> Vec<u8> {
         let mut bytes: Vec<u8> = Vec::new();
         bytes.extend_from_slice(self.dh.as_ref());
@@ -203,6 +203,10 @@ pub trait CryptoProvider {
     type PublicKey: AsRef<[u8]> + Debug + Clone + Eq + Hash + Send + Sync;
     /// creates a `PublicKey`, necessary for recovering an instance
     /// from a persisted session state
+    ///
+    /// # Errors
+    ///
+    /// If the key bytes passed are invalid.
     fn new_public_key(key: &[u8]) -> Result<Self::PublicKey, DRError>;
 
     /// A private/public key-pair for use in the Diffie-Hellman calculation.
@@ -215,12 +219,20 @@ pub trait CryptoProvider {
     type RootKey: AsRef<[u8]>;
     /// creates a `RootKey`, necessary for recovering an instance
     /// from a persisted session state
+    ///
+    /// # Errors
+    ///
+    /// If the key bytes passed are invalid.
     fn new_root_key(key: &[u8]) -> Result<Self::RootKey, DRError>;
 
     /// A `ChainKey` is used in the inner symmetric ratchets.
     type ChainKey: AsRef<[u8]>;
     /// creates a `ChainKey`, necessary for recovering an instance
     /// from a persisted session state
+    ///
+    /// # Errors
+    ///
+    /// If the key bytes passed are invalid.
     fn new_chain_key(key: &[u8]) -> Result<Self::ChainKey, DRError>;
 
     /// A `MessageKey` is used to encrypt/decrypt messages.
@@ -278,6 +290,10 @@ pub trait KeyPair {
     fn private_bytes(&self) -> Vec<u8>;
 
     /// used for reinitialization using the persisted session state
+    ///
+    /// # Errors
+    ///
+    /// If the key bytes passed are invalid.
     #[cfg(feature = "serde")]
     fn new_from_bytes(private: &[u8], public: &[u8]) -> Result<Self, DRError>
     where
@@ -299,8 +315,6 @@ pub(crate) enum Diff<CP: CryptoProvider> {
 /// General Errors
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DRError {
-    /// Data is invalid or cannot be processed
-    InvalidData,
     /// Key is invalid or cannot be processed
     InvalidKey,
 }
@@ -310,9 +324,8 @@ impl Error for DRError {}
 
 impl fmt::Display for DRError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use DRError::{InvalidData, InvalidKey};
+        use DRError::InvalidKey;
         match self {
-            InvalidData => write!(f, "Data is invalid or cannot be processed"),
             InvalidKey => write!(f, "Key is invalid or cannot be processed"),
         }
     }

@@ -13,8 +13,8 @@ use std::{sync::Arc, vec::Vec};
 #[cfg(feature = "serde")]
 use crate::common::SessionState;
 use crate::{
-    Counter, CryptoProvider, DRError, DecryptError, Diff, EncryptUninit, Header, KeyPair,
     sync::{DefaultKeyStore, MessageKeyCacheTrait},
+    Counter, CryptoProvider, DRError, DecryptError, Diff, EncryptUninit, Header, KeyPair,
 };
 
 // TODO: avoid heap allocations in encrypt/decrypt interfaces
@@ -265,7 +265,7 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
     /// sets the `MessageKeyCacheTrait` instance for use as part of skipped messages
     /// the can be set immediately after creating the new `DoubleRatchet` instance
     /// or more specifically, before the the instance is used.
-    /// if nothing is set, it will default to a memory only KeyCache
+    /// if nothing is set, it will default to a memory only `KeyCache`
     pub fn set_message_key_cache(&mut self, cache: Arc<dyn MessageKeyCacheTrait<CP>>) {
         self.msg_key_cache = cache;
     }
@@ -482,6 +482,7 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
     // Calculate how many messages should be skipped in the current receive chain to get the
     // required `MessageKey`. Also check if `h` is valid.
     fn get_current_skip(&self, h: &Header<CP::PublicKey>) -> Result<usize, DecryptError> {
+        #[allow(clippy::cast_possible_truncation)]
         let skip =
             h.n.checked_sub(self.nr)
                 .ok_or(DecryptError::MessageKeyNotFound)? as usize;
@@ -499,9 +500,11 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
     fn get_next_skip(&self, h: &Header<CP::PublicKey>) -> Result<usize, DecryptError> {
         // without malicious participants this error can only be triggered if the local MessageKey
         // has already been deleted.
+        #[allow(clippy::cast_possible_truncation)]
         let prev_skip =
             h.pn.checked_sub(self.nr)
                 .ok_or(DecryptError::MessageKeyNotFound)? as usize;
+        #[allow(clippy::cast_possible_truncation)]
         let skip = h.n as usize;
         if self.msg_key_cache.max_skip() < cmp::max(prev_skip, skip) {
             Err(DecryptError::SkipTooLarge)
@@ -529,6 +532,7 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
             NextChain(rk, ckr, mks) => {
                 if self.ckr.is_some() && self.nr < h.pn {
                     let ckr = self.ckr.as_ref().unwrap();
+                    #[allow(clippy::cast_possible_truncation)]
                     let (_, prev_mks) = Self::skip_message_keys(ckr, (h.pn - self.nr - 1) as usize);
                     let dhr = self.dhr.as_ref().unwrap();
                     self.msg_key_cache.extend(self.id, dhr, self.nr, prev_mks);
@@ -716,7 +720,7 @@ pub mod mock {
             Self: Sized,
         {
             if private.len() != 1 || public.len() != 1 {
-                return Err(DRError::InvalidData);
+                return Err(DRError::InvalidKey);
             }
             Ok(Self([private[0]], PublicKey([public[0]])))
         }

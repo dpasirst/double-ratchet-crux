@@ -365,8 +365,14 @@ mod tests {
         );
         assert!(new_key_pair.is_ok());
         let new_key_pair = new_key_pair.unwrap();
-        assert_eq!(key_pair_ref.private_bytes().as_slice(), new_key_pair.private_bytes().as_slice());
-        assert_eq!(key_pair_ref.public().as_ref(), new_key_pair.public().as_ref());
+        assert_eq!(
+            key_pair_ref.private_bytes().as_slice(),
+            new_key_pair.private_bytes().as_slice()
+        );
+        assert_eq!(
+            key_pair_ref.public().as_ref(),
+            new_key_pair.public().as_ref()
+        );
     }
 
     #[tokio::test]
