@@ -721,7 +721,7 @@ pub mod mock {
             Self: Sized,
         {
             if private.len() != 1 || public.len() != 1 {
-                return Err(DRError::InvalidData);
+                return Err(DRError::InvalidKey);
             }
             Ok(Self([private[0]], PublicKey([public[0]])))
         }
