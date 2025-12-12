@@ -332,14 +332,14 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
     ///
     /// # Errors
     /// `DecryptError`
-    pub fn try_ratchet_encrypt<R: CryptoRng + RngCore>(
+    pub async fn try_ratchet_encrypt<R: CryptoRng + RngCore>(
         &mut self,
         plaintext: &[u8],
         associated_data: &[u8],
         rng: &mut R,
     ) -> Result<(Header<CP::PublicKey>, Vec<u8>), EncryptUninit> {
         if self.can_encrypt() {
-            Ok(self.ratchet_encrypt(plaintext, associated_data, rng))
+            Ok(self.ratchet_encrypt(plaintext, associated_data, rng).await)
         } else {
             Err(EncryptUninit)
         }
@@ -365,7 +365,8 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
     /// `try_ratchet_encrypt` instead to avoid panics.
     ///
     /// [specification]: https://signal.org/docs/specifications/doubleratchet/#encrypting-messages
-    pub fn ratchet_encrypt<R: CryptoRng + RngCore>(
+    #[allow(clippy::unused_async)]
+    pub async fn ratchet_encrypt<R: CryptoRng + RngCore>(
         &mut self,
         plaintext: &[u8],
         associated_data: &[u8],
