@@ -13,8 +13,8 @@ use std::{sync::Arc, vec::Vec};
 #[cfg(feature = "serde")]
 use crate::common::SessionState;
 use crate::{
-    Counter, CryptoProvider, DRError, DecryptError, Diff, EncryptUninit, Header, KeyPair,
     sync::{DefaultKeyStore, MessageKeyCacheTrait},
+    Counter, CryptoProvider, DRError, DecryptError, Diff, EncryptUninit, Header, KeyPair,
 };
 
 // TODO: avoid heap allocations in encrypt/decrypt interfaces
@@ -483,7 +483,7 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
     // required `MessageKey`. Also check if `h` is valid.
     fn get_current_skip(&self, h: &Header<CP::PublicKey>) -> Result<usize, DecryptError> {
         #[allow(clippy::cast_possible_truncation)]
-        let skip = 
+        let skip =
             h.n.checked_sub(self.nr)
                 .ok_or(DecryptError::MessageKeyNotFound)? as usize;
         if self.msg_key_cache.max_skip() < skip {
