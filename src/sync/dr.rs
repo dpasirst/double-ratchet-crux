@@ -265,7 +265,7 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
     /// sets the `MessageKeyCacheTrait` instance for use as part of skipped messages
     /// the can be set immediately after creating the new `DoubleRatchet` instance
     /// or more specifically, before the the instance is used.
-    /// if nothing is set, it will default to a memory only KeyCache
+    /// if nothing is set, it will default to a memory only `KeyCache`
     pub fn set_message_key_cache(&mut self, cache: Arc<dyn MessageKeyCacheTrait<CP>>) {
         self.msg_key_cache = cache;
     }

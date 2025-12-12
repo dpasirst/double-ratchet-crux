@@ -60,9 +60,9 @@ pub struct DefaultKeyStore<CP: CryptoProvider> {
     #[allow(clippy::type_complexity)]
     pub key_cache:
         SpinMutex<HashMap<u64, HashMap<CP::PublicKey, HashMap<Counter, CP::MessageKey>>>>,
-    /// see DEFAULT_MAX_SKIP
+    /// see `DEFAULT_MAX_SKIP`
     pub max_skip: SpinMutex<usize>,
-    /// see DEFAULT_MKS_CAPACITY
+    /// see `DEFAULT_MKS_CAPACITY`
     pub message_key_max_capacity: SpinMutex<usize>,
 }
 
@@ -164,15 +164,15 @@ impl<CP: CryptoProvider + 'static> MessageKeyCacheTrait<CP> for DefaultKeyStore<
     }
 }
 
-impl<CP: CryptoProvider + 'static> Into<Box<dyn MessageKeyCacheTrait<CP>>> for DefaultKeyStore<CP> {
-    fn into(self) -> Box<dyn MessageKeyCacheTrait<CP>> {
-        Box::new(self)
+impl<CP: CryptoProvider + 'static> From<DefaultKeyStore<CP>> for Box<dyn MessageKeyCacheTrait<CP>> {
+    fn from(val: DefaultKeyStore<CP>) -> Self {
+        Box::new(val)
     }
 }
 
-impl<CP: CryptoProvider + 'static> Into<Arc<dyn MessageKeyCacheTrait<CP>>> for DefaultKeyStore<CP> {
-    fn into(self) -> Arc<dyn MessageKeyCacheTrait<CP>> {
-        Arc::new(self)
+impl<CP: CryptoProvider + 'static> From<DefaultKeyStore<CP>> for Arc<dyn MessageKeyCacheTrait<CP>> {
+    fn from(val: DefaultKeyStore<CP>) -> Self {
+        Arc::new(val)
     }
 }
 
@@ -201,7 +201,7 @@ impl<T> SpinMutex<T> {
 
     /// Simplified `Mutex` impl that does not depend on `std`
     /// Warning: this should not be used for production purposes
-    pub fn lock(&self) -> SpinMutexGuard<T> {
+    pub fn lock(&self) -> SpinMutexGuard<'_, T> {
         // Spin until we can acquire the lock
         while self
             .locked
