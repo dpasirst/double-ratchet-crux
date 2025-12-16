@@ -24,6 +24,7 @@ serde_json = { version = "^1.0.140", optional = true }
 clear_on_drop = "0.2"
 # aesgcm is currently pre verification, aead is verified but for now, it only runs
 # on x86_84. We could make this feature based but aesgcm will do for testing.
+# https://github.com/cryspen/libcrux/issues/1269
 libcrux-aesgcm = "0.0.4"
 libcrux-ecdh = "0.0.4"
 libcrux-hkdf = "0.0.4"
