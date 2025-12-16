@@ -4,7 +4,7 @@ use core::convert::TryFrom;
 #[cfg(feature = "serde")]
 use core::fmt::Debug;
 use core::{cmp, fmt, hash::Hash};
-use rand_core::{CryptoRng, OsRng, RngCore};
+use rand_core::{CryptoRng, OsRng, RngCore, TryRngCore};
 
 #[cfg(not(feature = "std"))]
 use alloc::{sync::Arc, vec::Vec};
@@ -234,7 +234,9 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
         initial_send: Option<CP::ChainKey>,
     ) -> Self {
         Self {
-            id: OsRng.next_u64(),
+            // the following is not for cryptography so psudo random is okay; however,
+            // the current implementation is not no_std, so remediation will be required
+            id: OsRng.try_next_u64().unwrap_or(rand::random()),
             dhs: us,
             dhr: None,
             rk: shared_secret,
@@ -747,10 +749,6 @@ pub mod mock {
         }
         fn fill_bytes(&mut self, out: &mut [u8]) {
             rand_core::impls::fill_bytes_via_next(self, out);
-        }
-        fn try_fill_bytes(&mut self, out: &mut [u8]) -> Result<(), rand_core::Error> {
-            self.fill_bytes(out);
-            Ok(())
         }
     }
     impl super::CryptoRng for Rng {}
