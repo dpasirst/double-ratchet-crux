@@ -34,7 +34,9 @@ use double_ratchet::{self as dr, DRError, DecryptError, KeyPair as _};
 //     // https://github.com/cryspen/libcrux/issues/1269
 //     //aead::{Iv, Key, Tag, encrypt_detached as aes256gcm_encrypt, decrypt_detached as aes256gcm_decrypt},
 // };
-use libcrux_aesgcm::{AESGCM256_KEY_LEN, AesGcm256Key, AesGcm256Nonce, AesGcm256Tag, NONCE_LEN, TAG_LEN};
+use libcrux_aesgcm::{
+    AesGcm256Key, AesGcm256Nonce, AesGcm256Tag, AESGCM256_KEY_LEN, NONCE_LEN, TAG_LEN,
+};
 use libcrux_hkdf::hkdf;
 use libcrux_hmac::hmac;
 
@@ -71,14 +73,20 @@ impl dr::CryptoProvider for SignalCryptoProvider {
         if let Err(e) = hkdf(libcrux_hkdf::Algorithm::Sha256, &mut okm, salt, ikm, info) {
             panic!("failed to hkdf for kdf_rk {:?}", e);
         }
-        (SymmetricKey::from(&okm[..32].try_into().unwrap()), SymmetricKey::from(&okm[32..].try_into().unwrap()))
+        (
+            SymmetricKey::from(&okm[..32].try_into().unwrap()),
+            SymmetricKey::from(&okm[32..].try_into().unwrap()),
+        )
     }
 
     fn kdf_ck(ck: &SymmetricKey) -> (SymmetricKey, SymmetricKey) {
         let key = ck.0.as_slice();
         let mk = hmac(libcrux_hmac::Algorithm::Sha256, key, &[0x01], Some(32));
         let ck = hmac(libcrux_hmac::Algorithm::Sha256, key, &[0x02], Some(32));
-        (SymmetricKey(ck.try_into().unwrap()), SymmetricKey(mk.try_into().unwrap()))
+        (
+            SymmetricKey(ck.try_into().unwrap()),
+            SymmetricKey(mk.try_into().unwrap()),
+        )
     }
 
     fn encrypt(key: &SymmetricKey, pt: &[u8], ad: &[u8]) -> Vec<u8> {
@@ -87,17 +95,15 @@ impl dr::CryptoProvider for SignalCryptoProvider {
         let mut okm = [0; 80];
         hkdf(libcrux_hkdf::Algorithm::Sha256, &mut okm, &[], ikm, info)
             .expect("encrypt hkdf failed - boom!");
-        let ek = &okm[..AESGCM256_KEY_LEN]
-            .try_into()
-            .unwrap();
-        let iv = &okm[AESGCM256_KEY_LEN..(AESGCM256_KEY_LEN+NONCE_LEN)]
+        let ek = &okm[..AESGCM256_KEY_LEN].try_into().unwrap();
+        let iv = &okm[AESGCM256_KEY_LEN..(AESGCM256_KEY_LEN + NONCE_LEN)]
             .try_into()
             .unwrap(); // 12
-        // the following lines are commented out but here for reference. The show how to use
-        // libcrux aead impl which currently only works on x86_64
-        // let iv = Iv::new(iv).unwrap();
-        // let aes_key = Key::from_slice(libcrux::aead::Algorithm::Aes256Gcm, ek).unwrap();
-        // let (tag, mut ct) = aes256gcm_encrypt(&aes_key, pt, iv, ad).unwrap();
+                       // the following lines are commented out but here for reference. The show how to use
+                       // libcrux aead impl which currently only works on x86_64
+                       // let iv = Iv::new(iv).unwrap();
+                       // let aes_key = Key::from_slice(libcrux::aead::Algorithm::Aes256Gcm, ek).unwrap();
+                       // let (tag, mut ct) = aes256gcm_encrypt(&aes_key, pt, iv, ad).unwrap();
         let k: AesGcm256Key = <[u8; AESGCM256_KEY_LEN] as Into<AesGcm256Key>>::into(*ek);
         let nonce: AesGcm256Nonce = <[u8; NONCE_LEN] as Into<AesGcm256Nonce>>::into(*iv);
         let mut tag: AesGcm256Tag = [0; TAG_LEN].into();
@@ -110,7 +116,7 @@ impl dr::CryptoProvider for SignalCryptoProvider {
             ct.extend(&tag.as_ref()[..TAG_LEN]);
             okm.clear();
             ct
-        }        
+        }
     }
 
     fn decrypt(key: &SymmetricKey, ct: &[u8], ad: &[u8]) -> Result<Vec<u8>, DecryptError> {
@@ -119,13 +125,13 @@ impl dr::CryptoProvider for SignalCryptoProvider {
         let mut okm = [0; 80];
         hkdf(libcrux_hkdf::Algorithm::Sha256, &mut okm, &[], ikm, info)
             .map_err(|_| DecryptError::DecryptFailure)?;
-        
+
         let dk = &okm[..AESGCM256_KEY_LEN]
-        .try_into()
+            .try_into()
             .map_err(|_| DecryptError::DecryptFailure)?;
 
-        let iv = &okm[AESGCM256_KEY_LEN..(AESGCM256_KEY_LEN+NONCE_LEN)]
-        .try_into()
+        let iv = &okm[AESGCM256_KEY_LEN..(AESGCM256_KEY_LEN + NONCE_LEN)]
+            .try_into()
             .map_err(|_| DecryptError::DecryptFailure)?;
 
         let mut pt = vec![0u8; ct.len() - TAG_LEN];
@@ -133,9 +139,10 @@ impl dr::CryptoProvider for SignalCryptoProvider {
         let ct_len = ct.len() - TAG_LEN;
         let k: AesGcm256Key = <[u8; AESGCM256_KEY_LEN] as Into<AesGcm256Key>>::into(*dk);
         let nonce: AesGcm256Nonce = <[u8; NONCE_LEN] as Into<AesGcm256Nonce>>::into(*iv);
-        let tag: AesGcm256Tag = <[u8; TAG_LEN] as Into<AesGcm256Tag>>::into(ct[ct_len..]
-            .try_into()
-            .map_err(|_| DecryptError::DecryptFailure)?
+        let tag: AesGcm256Tag = <[u8; TAG_LEN] as Into<AesGcm256Tag>>::into(
+            ct[ct_len..]
+                .try_into()
+                .map_err(|_| DecryptError::DecryptFailure)?,
         );
 
         if let Err(_e) = k.decrypt(&mut pt, &nonce, ad, &ct[..ct_len], &tag) {
@@ -202,14 +209,14 @@ impl<'a> From<&'a libcrux_ecdh::X25519PrivateKey> for PublicKey {
                 // Call the libcrux function to derive the public key
                 let public_key_bytes = libcrux_ecdh::secret_to_public(
                     libcrux_ecdh::Algorithm::X25519,
-                    private_key_bytes
-                ).expect("Failed to convert X25519 PrivateKey");
+                    private_key_bytes,
+                )
+                .expect("Failed to convert X25519 PrivateKey");
                 // Wrap the resulting bytes in your PublicKey struct
                 PublicKey(
                     public_key_bytes
                         .try_into()
-                        .expect("Failed to convert X25519 PrivateKey"
-                    )
+                        .expect("Failed to convert X25519 PrivateKey"),
                 )
             }
             // Handle all other possible variants (e.g., Kyber, PQC)
@@ -218,8 +225,8 @@ impl<'a> From<&'a libcrux_ecdh::X25519PrivateKey> for PublicKey {
             // `X25519PrivateKey`` is the only possibility
             #[allow(unreachable_patterns)]
             _ => {
-                // In a production environment, you might want to return 
-                // a Result<PublicKey, E> instead of panicking, but for a 
+                // In a production environment, you might want to return
+                // a Result<PublicKey, E> instead of panicking, but for a
                 // simple `From` trait, panicking on unexpected input is common.
                 panic!("Cannot convert non-X25519 PrivateKey to PublicKey");
             }
@@ -250,8 +257,7 @@ impl fmt::Debug for KeyPair {
         write!(
             f,
             "KeyPair {{ private (bytes): {:?}, public: {:?} }}",
-            self.private,
-            self.public
+            self.private, self.public
         )
     }
 
@@ -269,7 +275,8 @@ impl dr::KeyPair for KeyPair {
     type PublicKey = PublicKey;
 
     fn new<R: CryptoRng + rand::Rng>(rng: &mut R) -> KeyPair {
-        let (private, public) = libcrux_ecdh::key_gen(libcrux_ecdh::Algorithm::X25519, rng).unwrap();
+        let (private, public) =
+            libcrux_ecdh::key_gen(libcrux_ecdh::Algorithm::X25519, rng).unwrap();
         let public: [u8; 32] = public.try_into().unwrap();
         let public = PublicKey::from(&public);
         KeyPair { private, public }
@@ -335,15 +342,13 @@ mod tests {
 
     #[test]
     fn signal_session() {
-        let mut rng = rand::rng();//OsRng;
+        let mut rng = rand::rng(); //OsRng;
         let (ad_a, ad_b) = (b"A2B:SessionID=42", b"B2A:SessionID=42");
 
         // Copy some values (these are usually the outcome of an X3DH key exchange)
         let bobs_prekey = KeyPair::new(&mut rng);
         let bobs_public_prekey = bobs_prekey.public().clone();
-        let shared = SymmetricKey(
-            *b"Output of a X3DH key exchange...",
-        );
+        let shared = SymmetricKey(*b"Output of a X3DH key exchange...");
 
         // Alice fetches Bob's prekey bundle and completes her side of the X3DH handshake
         let mut alice = SignalDR::new_alice(&shared, bobs_public_prekey, None, &mut rng);
@@ -414,7 +419,7 @@ mod tests {
 
     #[test]
     fn key_pair() {
-        let mut rng = rand::rng();//OsRng;
+        let mut rng = rand::rng(); //OsRng;
         let key_pair_ref = KeyPair::new(&mut rng);
         let new_key_pair = KeyPair::new_from_bytes(
             key_pair_ref.private_bytes().as_slice(),
@@ -434,15 +439,13 @@ mod tests {
 
     #[test]
     fn multiple_messages_key_kdf() {
-        let mut rng = rand::rng();//OsRng;
+        let mut rng = rand::rng(); //OsRng;
         let (ad_a, _ad_b) = (b"A2B:SessionID=42", b"B2A:SessionID=42");
 
         // Copy some values (these are usually the outcome of an X3DH key exchange)
         let bobs_prekey = KeyPair::new(&mut rng);
         let bobs_public_prekey = bobs_prekey.public().clone();
-        let shared = SymmetricKey(
-            *b"Output of a X3DH key exchange...",
-        );
+        let shared = SymmetricKey(*b"Output of a X3DH key exchange...");
 
         // Alice fetches Bob's prekey bundle and completes her side of the X3DH handshake
         let mut alice = SignalDR::new_alice(&shared, bobs_public_prekey, None, &mut rng);
