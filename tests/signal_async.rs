@@ -96,7 +96,7 @@ impl dr::CryptoProvider for SignalCryptoProvider {
         let ikm = key.0.as_slice();
         let info = b"WhisperMessageKeys";
         let mut okm = [0; 80];
-        hkdf(libcrux_hkdf::Algorithm::Sha256, &mut okm, &[], ikm, info)
+        hkdf(libcrux_hkdf::Algorithm::Sha256, &mut okm, b"", ikm, info)
             .expect("encrypt hkdf failed - boom!");
         let ek = &okm[..AESGCM256_KEY_LEN].try_into().unwrap();
         let iv = &okm[AESGCM256_KEY_LEN..(AESGCM256_KEY_LEN + NONCE_LEN)]
@@ -126,7 +126,7 @@ impl dr::CryptoProvider for SignalCryptoProvider {
         let ikm = key.0.as_slice();
         let info = b"WhisperMessageKeys";
         let mut okm = [0; 80];
-        hkdf(libcrux_hkdf::Algorithm::Sha256, &mut okm, &[], ikm, info)
+        hkdf(libcrux_hkdf::Algorithm::Sha256, &mut okm, b"", ikm, info)
             .map_err(|_| DecryptError::DecryptFailure)?;
 
         let dk = &okm[..AESGCM256_KEY_LEN]
