@@ -99,11 +99,12 @@ impl dr::CryptoProvider for SignalCryptoProvider {
         let iv = &okm[AESGCM256_KEY_LEN..(AESGCM256_KEY_LEN + NONCE_LEN)]
             .try_into()
             .unwrap(); // 12
-                       // the following lines are commented out but here for reference. The show how to use
-                       // libcrux aead impl which currently only works on x86_64
-                       // let iv = Iv::new(iv).unwrap();
-                       // let aes_key = Key::from_slice(libcrux::aead::Algorithm::Aes256Gcm, ek).unwrap();
-                       // let (tag, mut ct) = aes256gcm_encrypt(&aes_key, pt, iv, ad).unwrap();
+
+        // the following lines are commented out but here for reference. The show how to use
+        // libcrux aead impl which currently only works on x86_64
+        // let iv = Iv::new(iv).unwrap();
+        // let aes_key = Key::from_slice(libcrux::aead::Algorithm::Aes256Gcm, ek).unwrap();
+        // let (tag, mut ct) = aes256gcm_encrypt(&aes_key, pt, iv, ad).unwrap();
         let k: AesGcm256Key = <[u8; AESGCM256_KEY_LEN] as Into<AesGcm256Key>>::into(*ek);
         let nonce: AesGcm256Nonce = <[u8; NONCE_LEN] as Into<AesGcm256Nonce>>::into(*iv);
         let mut tag: AesGcm256Tag = [0; TAG_LEN].into();
