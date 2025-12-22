@@ -3,6 +3,7 @@ use rand_core::{CryptoRng, RngCore};
 
 #[cfg(not(feature = "std"))]
 use alloc::{
+    borrow::Cow,
     fmt::{self, Debug},
     string::String,
     vec::Vec,
@@ -11,6 +12,7 @@ use alloc::{
 use core::error::Error;
 #[cfg(feature = "std")]
 use std::{
+    borrow::Cow,
     error::Error,
     fmt::{self, Debug},
     string::String,
@@ -348,10 +350,10 @@ impl fmt::Display for EncryptUninit {
 }
 
 /// Error that may occur during `ratchet_decrypt`
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DecryptError {
     /// Could not verify-decrypt the ciphertext + associated data + header
-    DecryptFailure,
+    DecryptFailure(Cow<'static, str>),
 
     /// Could not find the message key required for decryption
     ///
@@ -373,7 +375,7 @@ impl fmt::Display for DecryptError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use DecryptError::{DecryptFailure, MessageKeyNotFound, SkipTooLarge, StorageFull};
         match self {
-            DecryptFailure => write!(f, "Error during verify-decrypting"),
+            DecryptFailure(e) => write!(f, "Error during verify-decrypting: {e}"),
             MessageKeyNotFound => {
                 write!(f, "Could not find the message key required for decryption")
             }

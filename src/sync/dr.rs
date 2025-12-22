@@ -659,7 +659,9 @@ pub mod mock {
             ad: &[u8],
         ) -> Result<Vec<u8>, crate::common::DecryptError> {
             if ct.len() < 3 + ad.len() || ct[..3] != mk[..] || !ct.ends_with(ad) {
-                Err(crate::common::DecryptError::DecryptFailure)
+                Err(crate::common::DecryptError::DecryptFailure(
+                    "Invalid parameters".into(),
+                ))
             } else {
                 Ok(Vec::from(&ct[3..ct.len() - ad.len()]))
             }
@@ -972,17 +974,27 @@ mod tests {
         ct_a_0_err[2] ^= 0x80;
         let mut h_a_0_err = h_a_0.clone();
         h_a_0_err.pn = 1;
-        assert_eq!(
-            Err(DecryptError::DecryptFailure),
-            bob.ratchet_decrypt(&h_a_0, &ct_a_0_err, ad_a)
+
+        assert!(
+            matches!(
+                bob.ratchet_decrypt(&h_a_0, &ct_a_0_err, ad_a),
+                Err(DecryptError::DecryptFailure(_))
+            ),
+            "Expected DecryptFailure, but got something else"
         );
-        assert_eq!(
-            Err(DecryptError::DecryptFailure),
-            bob.ratchet_decrypt(&h_a_0_err, &ct_a_0, ad_a)
+        assert!(
+            matches!(
+                bob.ratchet_decrypt(&h_a_0_err, &ct_a_0, ad_a),
+                Err(DecryptError::DecryptFailure(_))
+            ),
+            "Expected DecryptFailure, but got something else"
         );
-        assert_eq!(
-            Err(DecryptError::DecryptFailure),
-            bob.ratchet_decrypt(&h_a_0, &ct_a_0, ad_b)
+        assert!(
+            matches!(
+                bob.ratchet_decrypt(&h_a_0, &ct_a_0, ad_b),
+                Err(DecryptError::DecryptFailure(_))
+            ),
+            "Expected DecryptFailure, but got something else"
         );
 
         // Current Chain
@@ -994,17 +1006,26 @@ mod tests {
         let mut ct_a_2_err = ct_a_2.clone();
         ct_a_2_err[0] ^= 0x04;
 
-        assert_eq!(
-            Err(DecryptError::DecryptFailure),
-            bob.ratchet_decrypt(&h_a_2, &ct_a_2_err, ad_a)
+        assert!(
+            matches!(
+                bob.ratchet_decrypt(&h_a_2, &ct_a_2_err, ad_a),
+                Err(DecryptError::DecryptFailure(_))
+            ),
+            "Expected DecryptFailure, but got something else"
         );
-        assert_eq!(
-            Err(DecryptError::DecryptFailure),
-            bob.ratchet_decrypt(&h_a_2_err, &ct_a_2, ad_a)
+        assert!(
+            matches!(
+                bob.ratchet_decrypt(&h_a_2_err, &ct_a_2, ad_a),
+                Err(DecryptError::DecryptFailure(_))
+            ),
+            "Expected DecryptFailure, but got something else"
         );
-        assert_eq!(
-            Err(DecryptError::DecryptFailure),
-            bob.ratchet_decrypt(&h_a_2, &ct_a_2, ad_b)
+        assert!(
+            matches!(
+                bob.ratchet_decrypt(&h_a_2, &ct_a_2, ad_b),
+                Err(DecryptError::DecryptFailure(_))
+            ),
+            "Expected DecryptFailure, but got something else"
         );
 
         // Previous chain
@@ -1013,17 +1034,26 @@ mod tests {
         let (h_a_3, ct_a_3) = alice.ratchet_encrypt(b"Hi Bob", ad_a, &mut rng);
         bob.ratchet_decrypt(&h_a_3, &ct_a_3, ad_a).unwrap();
 
-        assert_eq!(
-            Err(DecryptError::DecryptFailure),
-            bob.ratchet_decrypt(&h_a_2, &ct_a_2_err, ad_a)
+        assert!(
+            matches!(
+                bob.ratchet_decrypt(&h_a_2, &ct_a_2_err, ad_a),
+                Err(DecryptError::DecryptFailure(_))
+            ),
+            "Expected DecryptFailure, but got something else"
         );
-        assert_eq!(
-            Err(DecryptError::DecryptFailure),
-            bob.ratchet_decrypt(&h_a_2_err, &ct_a_2, ad_a)
+        assert!(
+            matches!(
+                bob.ratchet_decrypt(&h_a_2_err, &ct_a_2, ad_a),
+                Err(DecryptError::DecryptFailure(_))
+            ),
+            "Expected DecryptFailure, but got something else"
         );
-        assert_eq!(
-            Err(DecryptError::DecryptFailure),
-            bob.ratchet_decrypt(&h_a_2, &ct_a_2, ad_b)
+        assert!(
+            matches!(
+                bob.ratchet_decrypt(&h_a_2, &ct_a_2, ad_b),
+                Err(DecryptError::DecryptFailure(_))
+            ),
+            "Expected DecryptFailure, but got something else"
         );
     }
 

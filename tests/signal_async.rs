@@ -128,15 +128,15 @@ impl dr::CryptoProvider for SignalCryptoProvider {
         let info = b"WhisperMessageKeys";
         let mut okm = [0; 80];
         hkdf(libcrux_hkdf::Algorithm::Sha256, &mut okm, b"", ikm, info)
-            .map_err(|_| DecryptError::DecryptFailure)?;
+            .map_err(|err| DecryptError::DecryptFailure(format!("{:?}", err).into()))?;
 
         let dk = &okm[..AESGCM256_KEY_LEN]
             .try_into()
-            .map_err(|_| DecryptError::DecryptFailure)?;
+            .map_err(|err| DecryptError::DecryptFailure(format!("{err}").into()))?;
 
         let iv = &okm[AESGCM256_KEY_LEN..(AESGCM256_KEY_LEN + NONCE_LEN)]
             .try_into()
-            .map_err(|_| DecryptError::DecryptFailure)?;
+            .map_err(|err| DecryptError::DecryptFailure(format!("{err}").into()))?;
 
         let mut pt = vec![0u8; ct.len() - TAG_LEN];
 
@@ -146,12 +146,12 @@ impl dr::CryptoProvider for SignalCryptoProvider {
         let tag: AesGcm256Tag = <[u8; TAG_LEN] as Into<AesGcm256Tag>>::into(
             ct[ct_len..]
                 .try_into()
-                .map_err(|_| DecryptError::DecryptFailure)?,
+                .map_err(|err| DecryptError::DecryptFailure(format!("{err}").into()))?,
         );
 
-        if let Err(_e) = k.decrypt(&mut pt, &nonce, ad, &ct[..ct_len], &tag) {
+        if let Err(err) = k.decrypt(&mut pt, &nonce, ad, &ct[..ct_len], &tag) {
             okm.clear();
-            Err(DecryptError::DecryptFailure)
+            Err(DecryptError::DecryptFailure(format!("{err}").into()))
         } else {
             okm.clear();
             Ok(pt)
