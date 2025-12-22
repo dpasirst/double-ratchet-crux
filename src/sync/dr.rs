@@ -14,7 +14,7 @@ use std::{sync::Arc, vec::Vec};
 use crate::common::SessionState;
 use crate::{
     sync::{DefaultKeyStore, MessageKeyCacheTrait},
-    Counter, CryptoProvider, DRError, DecryptError, Diff, EncryptUninit, Header, KeyPair,
+    Counter, CryptoProvider, DRError, DecryptError, Diff, EncryptError, Header, KeyPair,
 };
 
 // TODO: avoid heap allocations in encrypt/decrypt interfaces
@@ -338,11 +338,11 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
         plaintext: &[u8],
         associated_data: &[u8],
         rng: &mut R,
-    ) -> Result<(Header<CP::PublicKey>, Vec<u8>), EncryptUninit> {
+    ) -> Result<(Header<CP::PublicKey>, Vec<u8>), EncryptError> {
         if self.can_encrypt() {
-            Ok(self.ratchet_encrypt(plaintext, associated_data, rng))
+            Ok(self.ratchet_encrypt(plaintext, associated_data, rng)?)
         } else {
-            Err(EncryptUninit)
+            Err(EncryptError::EncryptUninit)
         }
     }
 
@@ -371,14 +371,14 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
         plaintext: &[u8],
         associated_data: &[u8],
         rng: &mut R,
-    ) -> (Header<CP::PublicKey>, Vec<u8>) {
+    ) -> Result<(Header<CP::PublicKey>, Vec<u8>), EncryptError> {
         // TODO: is this the correct place for clear_stack_on_return?
         let (h, mk) = self.ratchet_send_chain(rng);
         let mut ad = h.as_ref();
         ad.extend_from_slice(associated_data);
         //let pt = CP::encrypt(&mk, plaintext, &Self::concat(&h, associated_data));
-        let pt = CP::encrypt(&mk, plaintext, &ad);
-        (h, pt)
+        let pt = CP::encrypt(&mk, plaintext, &ad)?;
+        Ok((h, pt))
     }
 
     // Are we initialized such that we can encrypt messages?
@@ -646,11 +646,11 @@ pub mod mock {
             ([ck[0], ck[1], ck[2].wrapping_add(1)], *ck)
         }
 
-        fn encrypt(mk: &[u8; 3], pt: &[u8], ad: &[u8]) -> Vec<u8> {
+        fn encrypt(mk: &[u8; 3], pt: &[u8], ad: &[u8]) -> Result<Vec<u8>, EncryptError> {
             let mut ct = Vec::from(&mk[..]);
             ct.extend_from_slice(pt);
             ct.extend_from_slice(ad);
-            ct
+            Ok(ct)
         }
 
         fn decrypt(
@@ -786,9 +786,9 @@ mod tests {
         // Alice can encrypt, Bob can't
         let (pt_a, ad_a) = (b"Hi Bobby", b"A2B");
         let (pt_b, ad_b) = (b"What's up Al?", b"B2A");
-        let (h_a, ct_a) = alice.ratchet_encrypt(pt_a, ad_a, &mut rng);
+        let (h_a, ct_a) = alice.ratchet_encrypt(pt_a, ad_a, &mut rng).unwrap();
         assert_eq!(
-            Err(EncryptUninit),
+            Err(EncryptError::EncryptUninit),
             bob.try_ratchet_encrypt(pt_b, ad_b, &mut rng)
         );
         assert_eq!(
@@ -797,7 +797,7 @@ mod tests {
         );
 
         // but after decryption Bob can encrypt
-        let (h_b, ct_b) = bob.ratchet_encrypt(pt_b, ad_b, &mut rng);
+        let (h_b, ct_b) = bob.ratchet_encrypt(pt_b, ad_b, &mut rng).unwrap();
         assert_eq!(
             Ok(Vec::from(&pt_b[..])),
             alice.ratchet_decrypt(&h_b, &ct_b, ad_b)
@@ -812,8 +812,8 @@ mod tests {
         // Alice can encrypt, Bob can't
         let (pt_a, ad_a) = (b"Hi Bobby", b"A2B");
         let (pt_b, ad_b) = (b"What's up Al?", b"B2A");
-        let (h_a, ct_a) = alice.ratchet_encrypt(pt_a, ad_a, &mut rng);
-        let (h_b, ct_b) = bob.ratchet_encrypt(pt_b, ad_b, &mut rng);
+        let (h_a, ct_a) = alice.ratchet_encrypt(pt_a, ad_a, &mut rng).unwrap();
+        let (h_b, ct_b) = bob.ratchet_encrypt(pt_b, ad_b, &mut rng).unwrap();
         assert_eq!(
             Ok(Vec::from(&pt_a[..])),
             bob.ratchet_decrypt(&h_a, &ct_a, ad_a)
@@ -833,13 +833,13 @@ mod tests {
         // Alice can encrypt, Bob can't
         let (pt_a, ad_a) = (b"Hi Bobby", b"A2B");
         let (pt_b, ad_b) = (b"What's up Al?", b"B2A");
-        let (h_a, ct_a) = alice.ratchet_encrypt(pt_a, ad_a, &mut rng);
+        let (h_a, ct_a) = alice.ratchet_encrypt(pt_a, ad_a, &mut rng).unwrap();
         let alice_session_state = alice.session_state().encode().unwrap();
 
         let bob_session = SessionState::decode(&bob_session_state).unwrap();
         let mut bob = DR::try_from(&(bob_session, None)).unwrap();
         assert_eq!(
-            Err(EncryptUninit),
+            Err(EncryptError::EncryptUninit),
             bob.try_ratchet_encrypt(pt_b, ad_b, &mut rng)
         );
         assert_eq!(
@@ -848,7 +848,7 @@ mod tests {
         );
 
         // but after decryption Bob can encrypt
-        let (h_b, ct_b) = bob.ratchet_encrypt(pt_b, ad_b, &mut rng);
+        let (h_b, ct_b) = bob.ratchet_encrypt(pt_b, ad_b, &mut rng).unwrap();
         let alice_session = SessionState::decode(&alice_session_state).unwrap();
         let mut alice = DR::try_from(&(alice_session, None)).unwrap();
         assert_eq!(
@@ -865,12 +865,12 @@ mod tests {
 
         // Alice's message arrive out of order, some are even missing
         let pt_a_0 = b"Hi Bobby";
-        let (h_a_0, ct_a_0) = alice.ratchet_encrypt(pt_a_0, ad_a, &mut rng);
+        let (h_a_0, ct_a_0) = alice.ratchet_encrypt(pt_a_0, ad_a, &mut rng).unwrap();
         for _ in 1..9 {
-            alice.ratchet_encrypt(b"hello?", ad_a, &mut rng); // drop these messages
+            alice.ratchet_encrypt(b"hello?", ad_a, &mut rng).unwrap(); // drop these messages
         }
         let pt_a_9 = b"are you there?";
-        let (h_a_9, ct_a_9) = alice.ratchet_encrypt(pt_a_9, ad_a, &mut rng);
+        let (h_a_9, ct_a_9) = alice.ratchet_encrypt(pt_a_9, ad_a, &mut rng).unwrap();
         assert_eq!(
             Ok(Vec::from(&pt_a_9[..])),
             bob.ratchet_decrypt(&h_a_9, &ct_a_9, ad_a)
@@ -882,12 +882,12 @@ mod tests {
 
         // Bob's replies also arrive out of order
         let pt_b_0 = b"Yes I'm here";
-        let (h_b_0, ct_b_0) = bob.ratchet_encrypt(pt_b_0, ad_b, &mut rng);
+        let (h_b_0, ct_b_0) = bob.ratchet_encrypt(pt_b_0, ad_b, &mut rng).unwrap();
         for _ in 1..9 {
-            bob.ratchet_encrypt(b"why?", ad_b, &mut rng); // drop these messages
+            bob.ratchet_encrypt(b"why?", ad_b, &mut rng).unwrap(); // drop these messages
         }
         let pt_b_9 = b"Tell me why!!!";
-        let (h_b_9, ct_b_9) = bob.ratchet_encrypt(pt_b_9, ad_b, &mut rng);
+        let (h_b_9, ct_b_9) = bob.ratchet_encrypt(pt_b_9, ad_b, &mut rng).unwrap();
         assert_eq!(
             Ok(Vec::from(&pt_b_9[..])),
             alice.ratchet_decrypt(&h_b_9, &ct_b_9, ad_b)
@@ -905,27 +905,27 @@ mod tests {
         let (ad_a, ad_b) = (b"A2B", b"B2A");
 
         let pt_a_0 = b"Good day Robert";
-        let (h_a_0, ct_a_0) = alice.ratchet_encrypt(pt_a_0, ad_a, &mut rng);
+        let (h_a_0, ct_a_0) = alice.ratchet_encrypt(pt_a_0, ad_a, &mut rng).unwrap();
         assert_eq!(
             Ok(Vec::from(&pt_a_0[..])),
             bob.ratchet_decrypt(&h_a_0, &ct_a_0, ad_a)
         );
         let pt_a_1 = b"Do you like Rust?";
-        let (h_a_1, ct_a_1) = alice.ratchet_encrypt(pt_a_1, ad_a, &mut rng);
+        let (h_a_1, ct_a_1) = alice.ratchet_encrypt(pt_a_1, ad_a, &mut rng).unwrap();
         // Bob misses pt_a_1
 
         let pt_b_0 = b"Salutations Allison";
-        let (h_b_0, ct_b_0) = bob.ratchet_encrypt(pt_b_0, ad_b, &mut rng);
+        let (h_b_0, ct_b_0) = bob.ratchet_encrypt(pt_b_0, ad_b, &mut rng).unwrap();
         // Alice misses pt_b_0
         let pt_b_1 = b"How is your day going?";
-        let (h_b_1, ct_b_1) = bob.ratchet_encrypt(pt_b_1, ad_b, &mut rng);
+        let (h_b_1, ct_b_1) = bob.ratchet_encrypt(pt_b_1, ad_b, &mut rng).unwrap();
         assert_eq!(
             Ok(Vec::from(&pt_b_1[..])),
             alice.ratchet_decrypt(&h_b_1, &ct_b_1, ad_b)
         );
 
         let pt_a_2 = b"My day is fine.";
-        let (h_a_2, ct_a_2) = alice.ratchet_encrypt(pt_a_2, ad_a, &mut rng);
+        let (h_a_2, ct_a_2) = alice.ratchet_encrypt(pt_a_2, ad_a, &mut rng).unwrap();
         assert_eq!(
             Ok(Vec::from(&pt_a_2[..])),
             bob.ratchet_decrypt(&h_a_2, &ct_a_2, ad_a)
@@ -937,7 +937,7 @@ mod tests {
         );
 
         let pt_b_2 = b"Yes I like Rust";
-        let (h_b_2, ct_b_2) = bob.ratchet_encrypt(pt_b_2, ad_b, &mut rng);
+        let (h_b_2, ct_b_2) = bob.ratchet_encrypt(pt_b_2, ad_b, &mut rng).unwrap();
         assert_eq!(
             Ok(Vec::from(&pt_b_2[..])),
             alice.ratchet_decrypt(&h_b_2, &ct_b_2, ad_b)
@@ -956,10 +956,10 @@ mod tests {
         let (_alice, mut bob) = asymmetric_setup(&mut rng);
 
         assert_eq!(
-            Err(EncryptUninit),
+            Err(EncryptError::EncryptUninit),
             bob.try_ratchet_encrypt(b"", b"", &mut rng)
         );
-        bob.ratchet_encrypt(b"", b"", &mut rng);
+        bob.ratchet_encrypt(b"", b"", &mut rng).unwrap();
     }
 
     #[test]
@@ -969,7 +969,7 @@ mod tests {
         let (ad_a, ad_b) = (b"A2B", b"B2A");
 
         // Next chain
-        let (h_a_0, ct_a_0) = alice.ratchet_encrypt(b"Hi Bob", ad_a, &mut rng);
+        let (h_a_0, ct_a_0) = alice.ratchet_encrypt(b"Hi Bob", ad_a, &mut rng).unwrap();
         let mut ct_a_0_err = ct_a_0.clone();
         ct_a_0_err[2] ^= 0x80;
         let mut h_a_0_err = h_a_0.clone();
@@ -998,9 +998,9 @@ mod tests {
         );
 
         // Current Chain
-        let (h_a_1, ct_a_1) = alice.ratchet_encrypt(b"Hi Bob", ad_a, &mut rng);
+        let (h_a_1, ct_a_1) = alice.ratchet_encrypt(b"Hi Bob", ad_a, &mut rng).unwrap();
         bob.ratchet_decrypt(&h_a_1, &ct_a_1, ad_a).unwrap();
-        let (h_a_2, ct_a_2) = alice.ratchet_encrypt(b"Hi Bob", ad_a, &mut rng);
+        let (h_a_2, ct_a_2) = alice.ratchet_encrypt(b"Hi Bob", ad_a, &mut rng).unwrap();
         let mut h_a_2_err = h_a_2.clone();
         h_a_2_err.pn += 1;
         let mut ct_a_2_err = ct_a_2.clone();
@@ -1029,9 +1029,9 @@ mod tests {
         );
 
         // Previous chain
-        let (h_b, ct_b) = bob.ratchet_encrypt(b"Hi Alice", ad_b, &mut rng);
+        let (h_b, ct_b) = bob.ratchet_encrypt(b"Hi Alice", ad_b, &mut rng).unwrap();
         alice.ratchet_decrypt(&h_b, &ct_b, ad_b).unwrap();
-        let (h_a_3, ct_a_3) = alice.ratchet_encrypt(b"Hi Bob", ad_a, &mut rng);
+        let (h_a_3, ct_a_3) = alice.ratchet_encrypt(b"Hi Bob", ad_a, &mut rng).unwrap();
         bob.ratchet_decrypt(&h_a_3, &ct_a_3, ad_a).unwrap();
 
         assert!(
@@ -1066,17 +1066,17 @@ mod tests {
         let (mut alice, mut bob) = asymmetric_setup(&mut rng);
         let (ad_a, ad_b) = (b"A2B", b"B2A");
 
-        let (h_a_0, ct_a_0) = alice.ratchet_encrypt(b"Whatever", ad_a, &mut rng);
+        let (h_a_0, ct_a_0) = alice.ratchet_encrypt(b"Whatever", ad_a, &mut rng).unwrap();
         bob.ratchet_decrypt(&h_a_0, &ct_a_0, ad_a).unwrap();
         assert!(bob.ratchet_decrypt(&h_a_0, &ct_a_0, ad_a).is_err());
 
-        let (h_b_0, ct_b_0) = bob.ratchet_encrypt(b"Whatever", ad_b, &mut rng);
+        let (h_b_0, ct_b_0) = bob.ratchet_encrypt(b"Whatever", ad_b, &mut rng).unwrap();
         alice.ratchet_decrypt(&h_b_0, &ct_b_0, ad_b).unwrap();
         assert!(alice.ratchet_decrypt(&h_b_0, &ct_b_0, ad_b).is_err());
-        let (h_a_1, ct_a_1) = alice.ratchet_encrypt(b"Whatever", ad_a, &mut rng);
+        let (h_a_1, ct_a_1) = alice.ratchet_encrypt(b"Whatever", ad_a, &mut rng).unwrap();
         bob.ratchet_decrypt(&h_a_1, &ct_a_1, ad_a).unwrap();
         assert!(bob.ratchet_decrypt(&h_a_1, &ct_a_1, ad_a).is_err());
-        let (h_b_1, ct_b_1) = bob.ratchet_encrypt(b"Whatever", ad_b, &mut rng);
+        let (h_b_1, ct_b_1) = bob.ratchet_encrypt(b"Whatever", ad_b, &mut rng).unwrap();
         alice.ratchet_decrypt(&h_b_1, &ct_b_1, ad_b).unwrap();
         assert!(alice.ratchet_decrypt(&h_b_1, &ct_b_1, ad_b).is_err());
 
@@ -1089,11 +1089,13 @@ mod tests {
         let mut rng = mock::Rng::default();
         let (mut alice, mut bob) = asymmetric_setup(&mut rng);
         let (ad_a, ad_b) = (b"A2B", b"B2A");
-        let (h_a_0, ct_a_0) = alice.ratchet_encrypt(b"Hi Bob", ad_a, &mut rng);
+        let (h_a_0, ct_a_0) = alice.ratchet_encrypt(b"Hi Bob", ad_a, &mut rng).unwrap();
         bob.ratchet_decrypt(&h_a_0, &ct_a_0, ad_a).unwrap();
-        let (h_b_0, ct_b_0) = bob.ratchet_encrypt(b"Hi Alice", ad_b, &mut rng);
+        let (h_b_0, ct_b_0) = bob.ratchet_encrypt(b"Hi Alice", ad_b, &mut rng).unwrap();
         alice.ratchet_decrypt(&h_b_0, &ct_b_0, ad_b).unwrap();
-        let (mut h_a_1, ct_a_1) = alice.ratchet_encrypt(b"I will lie to you now", ad_a, &mut rng);
+        let (mut h_a_1, ct_a_1) = alice
+            .ratchet_encrypt(b"I will lie to you now", ad_a, &mut rng)
+            .unwrap();
         assert_eq!(h_a_1.pn, 1);
         h_a_1.pn = 0;
         assert!(bob.ratchet_decrypt(&h_a_1, &ct_a_1, ad_a).is_err());
@@ -1104,19 +1106,25 @@ mod tests {
         let mut rng = mock::Rng::default();
         let (mut alice, mut bob) = asymmetric_setup(&mut rng);
         let (ad_a, ad_b) = (b"A2B", b"B2A");
-        let (h_a_0, ct_a_0) = alice.ratchet_encrypt(b"Hi Bob", ad_a, &mut rng);
+        let (h_a_0, ct_a_0) = alice.ratchet_encrypt(b"Hi Bob", ad_a, &mut rng).unwrap();
         for _ in 0..=alice.max_skip() {
-            alice.ratchet_encrypt(b"Not sending this", ad_a, &mut rng);
+            alice
+                .ratchet_encrypt(b"Not sending this", ad_a, &mut rng)
+                .unwrap();
         }
-        let (h_a_1, ct_a_1) = alice.ratchet_encrypt(b"n > MAXSKIP", ad_a, &mut rng);
+        let (h_a_1, ct_a_1) = alice
+            .ratchet_encrypt(b"n > MAXSKIP", ad_a, &mut rng)
+            .unwrap();
         assert_eq!(
             Err(DecryptError::SkipTooLarge),
             bob.ratchet_decrypt(&h_a_1, &ct_a_1, ad_a)
         );
         bob.ratchet_decrypt(&h_a_0, &ct_a_0, ad_a).unwrap();
-        let (h_b, ct_b) = bob.ratchet_encrypt(b"Hi Alice", ad_b, &mut rng);
+        let (h_b, ct_b) = bob.ratchet_encrypt(b"Hi Alice", ad_b, &mut rng).unwrap();
         alice.ratchet_decrypt(&h_b, &ct_b, ad_b).unwrap();
-        let (h_a_2, ct_a_2) = alice.ratchet_encrypt(b"pn > MAXSKIP", ad_a, &mut rng);
+        let (h_a_2, ct_a_2) = alice
+            .ratchet_encrypt(b"pn > MAXSKIP", ad_a, &mut rng)
+            .unwrap();
         assert_eq!(
             Err(DecryptError::SkipTooLarge),
             bob.ratchet_decrypt(&h_a_2, &ct_a_2, ad_a)
@@ -1133,9 +1141,11 @@ mod tests {
         let mks_capacity = alice.msg_key_cache.max_capacity(); //aka DEFAULT_MKS_CAPACITY
         while stored < mks_capacity {
             for _ in 0..cmp::min(alice.max_skip(), mks_capacity - stored) {
-                alice.ratchet_encrypt(b"Not sending this", ad_a, &mut rng);
+                alice
+                    .ratchet_encrypt(b"Not sending this", ad_a, &mut rng)
+                    .unwrap();
             }
-            let (h_a, ct_a) = alice.ratchet_encrypt(b"Hello Bob", ad_a, &mut rng);
+            let (h_a, ct_a) = alice.ratchet_encrypt(b"Hello Bob", ad_a, &mut rng).unwrap();
             bob.ratchet_decrypt(&h_a, &ct_a, ad_a).unwrap();
             stored += bob.max_skip();
             // We need to downcast the trait object *inside* the Arc.
@@ -1151,8 +1161,12 @@ mod tests {
                 .map(|hm| hm.len())
                 .sum::<usize>();
         }
-        alice.ratchet_encrypt(b"Bob can't store this key anymore", ad_a, &mut rng);
-        let (h_a, ct_a) = alice.ratchet_encrypt(b"Gotcha, Bob!", ad_a, &mut rng);
+        alice
+            .ratchet_encrypt(b"Bob can't store this key anymore", ad_a, &mut rng)
+            .unwrap();
+        let (h_a, ct_a) = alice
+            .ratchet_encrypt(b"Gotcha, Bob!", ad_a, &mut rng)
+            .unwrap();
         assert_eq!(
             Err(DecryptError::StorageFull),
             bob.ratchet_decrypt(&h_a, &ct_a, ad_a)
@@ -1170,17 +1184,25 @@ mod tests {
         let (mut alice, mut bob) = symmetric_setup(&mut rng);
         alice.pn = 10;
         bob.pn = 10;
-        let (h_a, ct_a) = alice.ratchet_encrypt(b"not important", ad_a, &mut rng);
-        let (h_b, ct_b) = bob.ratchet_encrypt(b"not important", ad_b, &mut rng);
+        let (h_a, ct_a) = alice
+            .ratchet_encrypt(b"not important", ad_a, &mut rng)
+            .unwrap();
+        let (h_b, ct_b) = bob
+            .ratchet_encrypt(b"not important", ad_b, &mut rng)
+            .unwrap();
         let _ = alice.ratchet_decrypt(&h_b, &ct_b, ad_b);
         let _ = bob.ratchet_decrypt(&h_a, &ct_a, ad_a);
 
         let (mut alice, mut bob) = asymmetric_setup(&mut rng);
         alice.pn = 10;
-        let (h_a, ct_a) = alice.ratchet_encrypt(b"not important", ad_a, &mut rng);
+        let (h_a, ct_a) = alice
+            .ratchet_encrypt(b"not important", ad_a, &mut rng)
+            .unwrap();
         let _ = bob.ratchet_decrypt(&h_a, &ct_a, ad_a);
         bob.pn = 10;
-        let (h_b, ct_b) = bob.ratchet_encrypt(b"not important", ad_b, &mut rng);
+        let (h_b, ct_b) = bob
+            .ratchet_encrypt(b"not important", ad_b, &mut rng)
+            .unwrap();
         let _ = alice.ratchet_decrypt(&h_b, &ct_b, ad_b);
     }
 }

@@ -173,7 +173,14 @@ pub trait CryptoProvider {
     /// Authenticate-encrypt the plaintext and associated data.
     ///
     /// This method MUST authenticate `associated_data`, because it contains the header bytes.
-    fn encrypt(key: &Self::MessageKey, plaintext: &[u8], associated_data: &[u8]) -> Vec<u8>;
+    ///
+    /// # Errors
+    /// `EncryptError`
+    fn encrypt(
+        key: &Self::MessageKey,
+        plaintext: &[u8],
+        associated_data: &[u8],
+    ) -> Result<Vec<u8>, EncryptError>;
 
     /// Verify-decrypt the ciphertext and associated data.
     fn decrypt(
@@ -259,7 +266,14 @@ pub trait CryptoProvider {
     /// Authenticate-encrypt the plaintext and associated data.
     ///
     /// This method MUST authenticate `associated_data`, because it contains the header bytes.
-    fn encrypt(key: &Self::MessageKey, plaintext: &[u8], associated_data: &[u8]) -> Vec<u8>;
+    ///
+    /// # Errors
+    /// `EncryptError`
+    fn encrypt(
+        key: &Self::MessageKey,
+        plaintext: &[u8],
+        associated_data: &[u8],
+    ) -> Result<Vec<u8>, EncryptError>;
 
     /// Verify-decrypt the ciphertext and associated data.
     ///
@@ -321,7 +335,6 @@ pub enum DRError {
     InvalidKey,
 }
 
-#[cfg(feature = "std")]
 impl Error for DRError {}
 
 impl fmt::Display for DRError {
@@ -333,19 +346,28 @@ impl fmt::Display for DRError {
     }
 }
 
-/// Error that occurs on `try_ratchet_encrypt` before the state is initialized.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct EncryptUninit;
+/// Error that may occur during `ratchet_decrypt`
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EncryptError {
+    /// Could not encrypt the plaintext
+    EncryptFailure(Cow<'static, str>),
 
-#[cfg(feature = "std")]
-impl Error for EncryptUninit {}
+    /// Error that occurs on `try_ratchet_encrypt` before the state is initialized.
+    EncryptUninit,
+}
 
-impl fmt::Display for EncryptUninit {
+impl Error for EncryptError {}
+
+impl fmt::Display for EncryptError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "Encrypt not yet initialized (you must receive a message first)"
-        )
+        use EncryptError::{EncryptFailure, EncryptUninit};
+        match self {
+            EncryptFailure(e) => write!(f, "Error during encrypting: {e}"),
+            EncryptUninit => write!(
+                f,
+                "Encrypt not yet initialized (you must receive a message first)"
+            ),
+        }
     }
 }
 
@@ -368,7 +390,6 @@ pub enum DecryptError {
     StorageFull,
 }
 
-#[cfg(feature = "std")]
 impl Error for DecryptError {}
 
 impl fmt::Display for DecryptError {
