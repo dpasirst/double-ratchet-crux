@@ -159,7 +159,10 @@ pub trait CryptoProvider {
     type MessageKey: Send + Sync;
 
     /// Perform the Diffie-Hellman operation.
-    fn diffie_hellman(us: &Self::KeyPair, them: &Self::PublicKey) -> Self::SharedSecret;
+    fn diffie_hellman(
+        us: &Self::KeyPair,
+        them: &Self::PublicKey,
+    ) -> Result<Self::SharedSecret, DRError>;
 
     /// Derive a new root-key/chain-key pair from the old root-key and a fresh shared secret.
     fn kdf_rk(
@@ -252,16 +255,28 @@ pub trait CryptoProvider {
     type MessageKey: Clone + Debug + Send + Sync + Hash;
 
     /// Perform the Diffie-Hellman operation.
-    fn diffie_hellman(us: &Self::KeyPair, them: &Self::PublicKey) -> Self::SharedSecret;
+    ///
+    /// # Errors
+    /// `DRError`
+    fn diffie_hellman(
+        us: &Self::KeyPair,
+        them: &Self::PublicKey,
+    ) -> Result<Self::SharedSecret, DRError>;
 
     /// Derive a new root-key/chain-key pair from the old root-key and a fresh shared secret.
+    ///
+    /// # Errors
+    /// `DRError`
     fn kdf_rk(
         root_key: &Self::RootKey,
         shared_secret: &Self::SharedSecret,
-    ) -> (Self::RootKey, Self::ChainKey);
+    ) -> Result<(Self::RootKey, Self::ChainKey), DRError>;
 
     /// Derive a new chain-key/message-key pair from the old chain-key.
-    fn kdf_ck(chain_key: &Self::ChainKey) -> (Self::ChainKey, Self::MessageKey);
+    ///
+    /// # Errors
+    /// `DRError`
+    fn kdf_ck(chain_key: &Self::ChainKey) -> Result<(Self::ChainKey, Self::MessageKey), DRError>;
 
     /// Authenticate-encrypt the plaintext and associated data.
     ///
@@ -329,19 +344,25 @@ pub(crate) enum Diff<CP: CryptoProvider> {
 }
 
 /// General Errors
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DRError {
     /// Key is invalid or cannot be processed
     InvalidKey,
+    /// diffie hellman or similar key agreement error
+    KeyAgreementFailure(Cow<'static, str>),
+    /// kdf error
+    KeyDerivationFunction(Cow<'static, str>),
 }
 
 impl Error for DRError {}
 
 impl fmt::Display for DRError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use DRError::InvalidKey;
+        use DRError::{InvalidKey, KeyAgreementFailure, KeyDerivationFunction};
         match self {
             InvalidKey => write!(f, "Key is invalid or cannot be processed"),
+            KeyAgreementFailure(e) => write!(f, "Key Agreement Failure: {e}"),
+            KeyDerivationFunction(e) => write!(f, "Key Derivation Fn Failure: {e}"),
         }
     }
 }

@@ -60,41 +60,61 @@ impl dr::CryptoProvider for SignalCryptoProvider {
     type ChainKey = SymmetricKey;
     type MessageKey = SymmetricKey;
 
-    fn diffie_hellman(us: &KeyPair, them: &PublicKey) -> SharedSecret {
+    fn diffie_hellman(us: &KeyPair, them: &PublicKey) -> Result<SharedSecret, DRError> {
         // note: decapsulate(alg, point (public), scalar (private)) -> shared secret
-        libcrux_ecdh::derive(libcrux_ecdh::Algorithm::X25519, &them.0, &us.private).unwrap()
+        libcrux_ecdh::derive(libcrux_ecdh::Algorithm::X25519, &them.0, &us.private)
+            .map_err(|e| DRError::KeyAgreementFailure(format!("{:?}", e).into()))
     }
 
-    fn kdf_rk(rk: &SymmetricKey, s: &SharedSecret) -> (SymmetricKey, SymmetricKey) {
+    fn kdf_rk(
+        rk: &SymmetricKey,
+        s: &SharedSecret,
+    ) -> Result<(SymmetricKey, SymmetricKey), DRError> {
         let salt = rk.0.as_slice();
         let ikm = s;
         let info = &b"WhisperRatchet"[..];
         let mut okm = [0; 64];
-        if let Err(e) = hkdf(libcrux_hkdf::Algorithm::Sha256, &mut okm, salt, ikm, info) {
-            panic!("failed to hkdf for kdf_rk {:?}", e);
-        }
-        (
-            SymmetricKey::from(&okm[..32].try_into().expect("this should never error")),
-            SymmetricKey::from(&okm[32..].try_into().expect("this should never error")),
-        )
+        hkdf(libcrux_hkdf::Algorithm::Sha256, &mut okm, salt, ikm, info)
+            .map_err(|e| DRError::KeyDerivationFunction(format!("kdf_rk {:?}", e).into()))?;
+        Ok((
+            SymmetricKey::from(
+                &okm[..32].try_into().map_err(|e| {
+                    DRError::KeyDerivationFunction(format!("kdf_rk {:?}", e).into())
+                })?,
+            ),
+            SymmetricKey::from(
+                &okm[32..].try_into().map_err(|e| {
+                    DRError::KeyDerivationFunction(format!("kdf_rk {:?}", e).into())
+                })?,
+            ),
+        ))
     }
 
-    fn kdf_ck(ck: &SymmetricKey) -> (SymmetricKey, SymmetricKey) {
+    fn kdf_ck(ck: &SymmetricKey) -> Result<(SymmetricKey, SymmetricKey), DRError> {
         let key = ck.0.as_slice();
         let mk = hmac(libcrux_hmac::Algorithm::Sha256, key, &[0x01], Some(32));
         let ck = hmac(libcrux_hmac::Algorithm::Sha256, key, &[0x02], Some(32));
-        (
-            SymmetricKey(ck.try_into().expect("this should never error")),
-            SymmetricKey(mk.try_into().expect("this should never error")),
-        )
+        Ok((
+            SymmetricKey(
+                ck.try_into().map_err(|e| {
+                    DRError::KeyDerivationFunction(format!("kdf_ck {:?}", e).into())
+                })?,
+            ),
+            SymmetricKey(
+                mk.try_into().map_err(|e| {
+                    DRError::KeyDerivationFunction(format!("kdf_ck {:?}", e).into())
+                })?,
+            ),
+        ))
     }
 
     fn encrypt(key: &SymmetricKey, pt: &[u8], ad: &[u8]) -> Result<Vec<u8>, EncryptError> {
         let ikm = key.0.as_slice();
         let info = b"WhisperMessageKeys";
         let mut okm = [0; 80];
-        hkdf(libcrux_hkdf::Algorithm::Sha256, &mut okm, b"", ikm, info)
-            .map_err(|err| EncryptError::EncryptFailure(format!("hkdf failed: {:?}", err).into()))?;
+        hkdf(libcrux_hkdf::Algorithm::Sha256, &mut okm, b"", ikm, info).map_err(|err| {
+            EncryptError::EncryptFailure(format!("hkdf failed: {:?}", err).into())
+        })?;
         let ek = &okm[..AESGCM256_KEY_LEN].try_into().unwrap();
         let iv = &okm[AESGCM256_KEY_LEN..(AESGCM256_KEY_LEN + NONCE_LEN)]
             .try_into() // 12
@@ -352,7 +372,7 @@ mod tests {
         let shared = SymmetricKey(*b"Output of a X3DH key exchange...");
 
         // Alice fetches Bob's prekey bundle and completes her side of the X3DH handshake
-        let mut alice = SignalDR::new_alice(&shared, bobs_public_prekey, None, &mut rng);
+        let mut alice = SignalDR::new_alice(&shared, bobs_public_prekey, None, &mut rng)?;
         // Alice creates her first message to Bob
         let pt_a_0 = b"Hello Bob";
         let (h_a_0, ct_a_0) = alice.ratchet_encrypt(pt_a_0, ad_a, &mut rng)?;
@@ -450,7 +470,7 @@ mod tests {
         let shared = SymmetricKey(*b"Output of a X3DH key exchange...");
 
         // Alice fetches Bob's prekey bundle and completes her side of the X3DH handshake
-        let mut alice = SignalDR::new_alice(&shared, bobs_public_prekey, None, &mut rng);
+        let mut alice = SignalDR::new_alice(&shared, bobs_public_prekey, None, &mut rng)?;
         // Alice creates her first message to Bob
         let pt_a_0 = b"Hello Bob";
         let (h_a_0, ct_a_0) = alice.ratchet_encrypt(pt_a_0, ad_a, &mut rng)?;

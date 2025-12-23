@@ -183,16 +183,19 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
     ///  - `them` must be *authenticated*
     ///  - `initial_receive` is `None` or `Some(key)` where `key` is *confidential* and *authenticated*
     ///
+    /// # Errors
+    /// `DRError`
+    ///
     /// [specification]: https://signal.org/docs/specifications/doubleratchet/#initialization
     pub fn new_alice<R: CryptoRng + RngCore>(
         shared_secret: &CP::RootKey,
         them: CP::PublicKey,
         initial_receive: Option<CP::ChainKey>,
         rng: &mut R,
-    ) -> Self {
+    ) -> Result<Self, DRError> {
         let dhs = CP::KeyPair::new(rng);
-        let (rk, cks) = CP::kdf_rk(shared_secret, &CP::diffie_hellman(&dhs, &them));
-        Self {
+        let (rk, cks) = CP::kdf_rk(shared_secret, &CP::diffie_hellman(&dhs, &them)?)?;
+        Ok(Self {
             id: rng.next_u64(),
             dhs,
             dhr: Some(them),
@@ -203,7 +206,7 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
             nr: 0,
             pn: 0,
             msg_key_cache: Arc::new(DefaultKeyStore::new()),
-        }
+        })
     }
 
     /// Initialize "Bob": the receiver of the first message.
@@ -365,6 +368,9 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
     /// Panics if `self` is not initialized for sending yet. If this is a concern, use
     /// `try_ratchet_encrypt` instead to avoid panics.
     ///
+    /// # Errors
+    /// `DRError`
+    ///
     /// [specification]: https://signal.org/docs/specifications/doubleratchet/#encrypting-messages
     pub fn ratchet_encrypt<R: CryptoRng + RngCore>(
         &mut self,
@@ -373,7 +379,9 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
         rng: &mut R,
     ) -> Result<(Header<CP::PublicKey>, Vec<u8>), EncryptError> {
         // TODO: is this the correct place for clear_stack_on_return?
-        let (h, mk) = self.ratchet_send_chain(rng);
+        let (h, mk) = self
+            .ratchet_send_chain(rng)
+            .map_err(|e| EncryptError::EncryptFailure(format!("{e}").into()))?;
         let mut ad = h.as_ref();
         ad.extend_from_slice(associated_data);
         //let pt = CP::encrypt(&mk, plaintext, &Self::concat(&h, associated_data));
@@ -397,14 +405,14 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
     fn ratchet_send_chain<R: CryptoRng + RngCore>(
         &mut self,
         rng: &mut R,
-    ) -> (Header<CP::PublicKey>, CP::MessageKey) {
+    ) -> Result<(Header<CP::PublicKey>, CP::MessageKey), DRError> {
         if self.cks.is_none() {
             let dhr = self
                 .dhr
                 .as_ref()
                 .expect("not yet initialized for encryption");
             self.dhs = CP::KeyPair::new(rng);
-            let (rk, cks) = CP::kdf_rk(&self.rk, &CP::diffie_hellman(&self.dhs, dhr));
+            let (rk, cks) = CP::kdf_rk(&self.rk, &CP::diffie_hellman(&self.dhs, dhr)?)?;
             self.rk = rk;
             self.cks = Some(cks);
             self.pn = self.ns;
@@ -415,10 +423,10 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
             n: self.ns,
             pn: self.pn,
         };
-        let (cks, mk) = CP::kdf_ck(self.cks.as_ref().unwrap());
+        let (cks, mk) = CP::kdf_ck(self.cks.as_ref().unwrap())?;
         self.cks = Some(cks);
         self.ns += 1;
-        (h, mk)
+        Ok((h, mk))
     }
 
     /// Verify-decrypt the `ciphertext`, update `self` and return the plaintext.
@@ -451,7 +459,8 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
         h.extend_from_slice(associated_data);
         let (diff, pt) = self.try_decrypt(header, ciphertext, &h)?;
         //self.try_decrypt(header, ciphertext, &Self::concat(&header, associated_data))?;
-        self.update(diff, header);
+        self.update(diff, header)
+            .map_err(|e| DecryptError::DecryptFailure(format!("{e}").into()))?;
         Ok(pt)
     }
 
@@ -470,12 +479,19 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
             Ok((OldKey, CP::decrypt(&mk, ct, ad)?))
         } else if self.dhr.as_ref() == Some(&h.dh) {
             let (ckr, mut mks) =
-                Self::skip_message_keys(self.ckr.as_ref().unwrap(), self.get_current_skip(h)?);
+                Self::skip_message_keys(self.ckr.as_ref().unwrap(), self.get_current_skip(h)?)
+                    .map_err(|e| DecryptError::DecryptFailure(format!("{e}").into()))?;
             let mk = mks.pop().unwrap();
             Ok((CurrentChain(ckr, mks), CP::decrypt(&mk, ct, ad)?))
         } else {
-            let (rk, ckr) = CP::kdf_rk(&self.rk, &CP::diffie_hellman(&self.dhs, &h.dh));
-            let (ckr, mut mks) = Self::skip_message_keys(&ckr, self.get_next_skip(h)?);
+            let (rk, ckr) = CP::kdf_rk(
+                &self.rk,
+                &CP::diffie_hellman(&self.dhs, &h.dh)
+                    .map_err(|e| DecryptError::DecryptFailure(format!("{e}").into()))?,
+            )
+            .map_err(|e| DecryptError::DecryptFailure(format!("{e}").into()))?;
+            let (ckr, mut mks) = Self::skip_message_keys(&ckr, self.get_next_skip(h)?)
+                .map_err(|e| DecryptError::DecryptFailure(format!("{e}").into()))?;
             let mk = mks.pop().unwrap();
             Ok((NextChain(rk, ckr, mks), CP::decrypt(&mk, ct, ad)?))
         }
@@ -522,7 +538,7 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
     }
 
     // Update the internal state. Assumes that the validity of `h` has already been checked.
-    fn update(&mut self, diff: Diff<CP>, h: &Header<CP::PublicKey>) {
+    fn update(&mut self, diff: Diff<CP>, h: &Header<CP::PublicKey>) -> Result<(), DRError> {
         use Diff::{CurrentChain, NextChain, OldKey};
         match diff {
             OldKey => self.msg_key_cache.remove(&self.id, &h.dh, h.n),
@@ -535,7 +551,8 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
                 if self.ckr.is_some() && self.nr < h.pn {
                     let ckr = self.ckr.as_ref().unwrap();
                     #[allow(clippy::cast_possible_truncation)]
-                    let (_, prev_mks) = Self::skip_message_keys(ckr, (h.pn - self.nr - 1) as usize);
+                    let (_, prev_mks) =
+                        Self::skip_message_keys(ckr, (h.pn - self.nr - 1) as usize)?;
                     let dhr = self.dhr.as_ref().unwrap();
                     self.msg_key_cache.extend(self.id, dhr, self.nr, prev_mks);
                 }
@@ -547,21 +564,25 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
                 self.msg_key_cache.extend(self.id, &h.dh, 0, mks);
             }
         }
+        Ok(())
     }
 
     // Do `skip + 1` ratchet steps in the receive chain. Return the last ChainKey
     // and all computed MessageKeys.
-    fn skip_message_keys(ckr: &CP::ChainKey, skip: usize) -> (CP::ChainKey, Vec<CP::MessageKey>) {
+    fn skip_message_keys(
+        ckr: &CP::ChainKey,
+        skip: usize,
+    ) -> Result<(CP::ChainKey, Vec<CP::MessageKey>), DRError> {
         // Note: should use std::iter::unfold (currently still in nightly)
         let mut mks = Vec::with_capacity(skip + 1);
-        let (mut ckr, mk) = CP::kdf_ck(ckr);
+        let (mut ckr, mk) = CP::kdf_ck(ckr)?;
         mks.push(mk);
         for _ in 0..skip {
-            let cm = CP::kdf_ck(&ckr);
+            let cm = CP::kdf_ck(&ckr)?;
             ckr = cm.0;
             mks.push(cm.1);
         }
-        (ckr, mks)
+        Ok((ckr, mks))
     }
 
     // Concatenate `h` and `ad` in a single byte-vector.
@@ -634,16 +655,16 @@ pub mod mock {
         type ChainKey = [u8; 3];
         type MessageKey = [u8; 3];
 
-        fn diffie_hellman(us: &KeyPair, them: &PublicKey) -> u8 {
-            us.0[0].wrapping_add(them.0[0])
+        fn diffie_hellman(us: &KeyPair, them: &PublicKey) -> Result<u8, DRError> {
+            Ok(us.0[0].wrapping_add(them.0[0]))
         }
 
-        fn kdf_rk(rk: &[u8; 2], s: &u8) -> ([u8; 2], [u8; 3]) {
-            ([rk[0], *s], [rk[0], rk[1], 0])
+        fn kdf_rk(rk: &[u8; 2], s: &u8) -> Result<([u8; 2], [u8; 3]), DRError> {
+            Ok(([rk[0], *s], [rk[0], rk[1], 0]))
         }
 
-        fn kdf_ck(ck: &[u8; 3]) -> ([u8; 3], [u8; 3]) {
-            ([ck[0], ck[1], ck[2].wrapping_add(1)], *ck)
+        fn kdf_ck(ck: &[u8; 3]) -> Result<([u8; 3], [u8; 3]), DRError> {
+            Ok(([ck[0], ck[1], ck[2].wrapping_add(1)], *ck))
         }
 
         fn encrypt(mk: &[u8; 3], pt: &[u8], ad: &[u8]) -> Result<Vec<u8>, EncryptError> {
@@ -763,7 +784,7 @@ mod tests {
         let secret = [42, 0];
         let pair = mock::KeyPair::new(rng);
         let pubkey = pair.public().clone();
-        let alice = DR::new_alice(&secret, pubkey, None, rng);
+        let alice = DR::new_alice(&secret, pubkey, None, rng).unwrap();
         let bob = DR::new_bob(secret, pair, None);
         (alice, bob)
     }
@@ -773,7 +794,7 @@ mod tests {
         let ck_init = [42, 0, 0];
         let pair = mock::KeyPair::new(rng);
         let pubkey = pair.public().clone();
-        let alice = DR::new_alice(&secret, pubkey, Some(ck_init), rng);
+        let alice = DR::new_alice(&secret, pubkey, Some(ck_init), rng).unwrap();
         let bob = DR::new_bob(secret, pair, Some(ck_init));
         (alice, bob)
     }
