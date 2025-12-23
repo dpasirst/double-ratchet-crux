@@ -14,7 +14,7 @@ use std::{sync::Arc, vec::Vec};
 use crate::common::SessionState;
 use crate::{
     sync::{DefaultKeyStore, MessageKeyCacheTrait},
-    Counter, CryptoProvider, DRError, DecryptError, Diff, EncryptUninit, Header, KeyPair,
+    Counter, CryptoProvider, DRError, DecryptError, Diff, EncryptError, Header, KeyPair,
 };
 
 // TODO: avoid heap allocations in encrypt/decrypt interfaces
@@ -183,16 +183,19 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
     ///  - `them` must be *authenticated*
     ///  - `initial_receive` is `None` or `Some(key)` where `key` is *confidential* and *authenticated*
     ///
+    /// # Errors
+    /// `DRError`
+    ///
     /// [specification]: https://signal.org/docs/specifications/doubleratchet/#initialization
     pub fn new_alice<R: CryptoRng + RngCore>(
         shared_secret: &CP::RootKey,
         them: CP::PublicKey,
         initial_receive: Option<CP::ChainKey>,
         rng: &mut R,
-    ) -> Self {
+    ) -> Result<Self, DRError> {
         let dhs = CP::KeyPair::new(rng);
-        let (rk, cks) = CP::kdf_rk(shared_secret, &CP::diffie_hellman(&dhs, &them));
-        Self {
+        let (rk, cks) = CP::kdf_rk(shared_secret, &CP::diffie_hellman(&dhs, &them)?)?;
+        Ok(Self {
             id: rng.next_u64(),
             dhs,
             dhr: Some(them),
@@ -203,7 +206,7 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
             nr: 0,
             pn: 0,
             msg_key_cache: Arc::new(DefaultKeyStore::new()),
-        }
+        })
     }
 
     /// Initialize "Bob": the receiver of the first message.
@@ -338,11 +341,11 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
         plaintext: &[u8],
         associated_data: &[u8],
         rng: &mut R,
-    ) -> Result<(Header<CP::PublicKey>, Vec<u8>), EncryptUninit> {
+    ) -> Result<(Header<CP::PublicKey>, Vec<u8>), EncryptError> {
         if self.can_encrypt() {
-            Ok(self.ratchet_encrypt(plaintext, associated_data, rng))
+            Ok(self.ratchet_encrypt(plaintext, associated_data, rng)?)
         } else {
-            Err(EncryptUninit)
+            Err(EncryptError::EncryptUninit)
         }
     }
 
@@ -365,20 +368,25 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
     /// Panics if `self` is not initialized for sending yet. If this is a concern, use
     /// `try_ratchet_encrypt` instead to avoid panics.
     ///
+    /// # Errors
+    /// `DRError`
+    ///
     /// [specification]: https://signal.org/docs/specifications/doubleratchet/#encrypting-messages
     pub fn ratchet_encrypt<R: CryptoRng + RngCore>(
         &mut self,
         plaintext: &[u8],
         associated_data: &[u8],
         rng: &mut R,
-    ) -> (Header<CP::PublicKey>, Vec<u8>) {
+    ) -> Result<(Header<CP::PublicKey>, Vec<u8>), EncryptError> {
         // TODO: is this the correct place for clear_stack_on_return?
-        let (h, mk) = self.ratchet_send_chain(rng);
+        let (h, mk) = self
+            .ratchet_send_chain(rng)
+            .map_err(|e| EncryptError::EncryptFailure(format!("{e}").into()))?;
         let mut ad = h.as_ref();
         ad.extend_from_slice(associated_data);
         //let pt = CP::encrypt(&mk, plaintext, &Self::concat(&h, associated_data));
-        let pt = CP::encrypt(&mk, plaintext, &ad);
-        (h, pt)
+        let pt = CP::encrypt(&mk, plaintext, &ad)?;
+        Ok((h, pt))
     }
 
     // Are we initialized such that we can encrypt messages?
@@ -397,14 +405,14 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
     fn ratchet_send_chain<R: CryptoRng + RngCore>(
         &mut self,
         rng: &mut R,
-    ) -> (Header<CP::PublicKey>, CP::MessageKey) {
+    ) -> Result<(Header<CP::PublicKey>, CP::MessageKey), DRError> {
         if self.cks.is_none() {
             let dhr = self
                 .dhr
                 .as_ref()
                 .expect("not yet initialized for encryption");
             self.dhs = CP::KeyPair::new(rng);
-            let (rk, cks) = CP::kdf_rk(&self.rk, &CP::diffie_hellman(&self.dhs, dhr));
+            let (rk, cks) = CP::kdf_rk(&self.rk, &CP::diffie_hellman(&self.dhs, dhr)?)?;
             self.rk = rk;
             self.cks = Some(cks);
             self.pn = self.ns;
@@ -415,10 +423,10 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
             n: self.ns,
             pn: self.pn,
         };
-        let (cks, mk) = CP::kdf_ck(self.cks.as_ref().unwrap());
+        let (cks, mk) = CP::kdf_ck(self.cks.as_ref().unwrap())?;
         self.cks = Some(cks);
         self.ns += 1;
-        (h, mk)
+        Ok((h, mk))
     }
 
     /// Verify-decrypt the `ciphertext`, update `self` and return the plaintext.
@@ -451,7 +459,8 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
         h.extend_from_slice(associated_data);
         let (diff, pt) = self.try_decrypt(header, ciphertext, &h)?;
         //self.try_decrypt(header, ciphertext, &Self::concat(&header, associated_data))?;
-        self.update(diff, header);
+        self.update(diff, header)
+            .map_err(|e| DecryptError::DecryptFailure(format!("{e}").into()))?;
         Ok(pt)
     }
 
@@ -470,12 +479,19 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
             Ok((OldKey, CP::decrypt(&mk, ct, ad)?))
         } else if self.dhr.as_ref() == Some(&h.dh) {
             let (ckr, mut mks) =
-                Self::skip_message_keys(self.ckr.as_ref().unwrap(), self.get_current_skip(h)?);
+                Self::skip_message_keys(self.ckr.as_ref().unwrap(), self.get_current_skip(h)?)
+                    .map_err(|e| DecryptError::DecryptFailure(format!("{e}").into()))?;
             let mk = mks.pop().unwrap();
             Ok((CurrentChain(ckr, mks), CP::decrypt(&mk, ct, ad)?))
         } else {
-            let (rk, ckr) = CP::kdf_rk(&self.rk, &CP::diffie_hellman(&self.dhs, &h.dh));
-            let (ckr, mut mks) = Self::skip_message_keys(&ckr, self.get_next_skip(h)?);
+            let (rk, ckr) = CP::kdf_rk(
+                &self.rk,
+                &CP::diffie_hellman(&self.dhs, &h.dh)
+                    .map_err(|e| DecryptError::DecryptFailure(format!("{e}").into()))?,
+            )
+            .map_err(|e| DecryptError::DecryptFailure(format!("{e}").into()))?;
+            let (ckr, mut mks) = Self::skip_message_keys(&ckr, self.get_next_skip(h)?)
+                .map_err(|e| DecryptError::DecryptFailure(format!("{e}").into()))?;
             let mk = mks.pop().unwrap();
             Ok((NextChain(rk, ckr, mks), CP::decrypt(&mk, ct, ad)?))
         }
@@ -522,7 +538,7 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
     }
 
     // Update the internal state. Assumes that the validity of `h` has already been checked.
-    fn update(&mut self, diff: Diff<CP>, h: &Header<CP::PublicKey>) {
+    fn update(&mut self, diff: Diff<CP>, h: &Header<CP::PublicKey>) -> Result<(), DRError> {
         use Diff::{CurrentChain, NextChain, OldKey};
         match diff {
             OldKey => self.msg_key_cache.remove(&self.id, &h.dh, h.n),
@@ -535,7 +551,8 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
                 if self.ckr.is_some() && self.nr < h.pn {
                     let ckr = self.ckr.as_ref().unwrap();
                     #[allow(clippy::cast_possible_truncation)]
-                    let (_, prev_mks) = Self::skip_message_keys(ckr, (h.pn - self.nr - 1) as usize);
+                    let (_, prev_mks) =
+                        Self::skip_message_keys(ckr, (h.pn - self.nr - 1) as usize)?;
                     let dhr = self.dhr.as_ref().unwrap();
                     self.msg_key_cache.extend(self.id, dhr, self.nr, prev_mks);
                 }
@@ -547,21 +564,25 @@ impl<CP: CryptoProvider> DoubleRatchet<CP> {
                 self.msg_key_cache.extend(self.id, &h.dh, 0, mks);
             }
         }
+        Ok(())
     }
 
     // Do `skip + 1` ratchet steps in the receive chain. Return the last ChainKey
     // and all computed MessageKeys.
-    fn skip_message_keys(ckr: &CP::ChainKey, skip: usize) -> (CP::ChainKey, Vec<CP::MessageKey>) {
+    fn skip_message_keys(
+        ckr: &CP::ChainKey,
+        skip: usize,
+    ) -> Result<(CP::ChainKey, Vec<CP::MessageKey>), DRError> {
         // Note: should use std::iter::unfold (currently still in nightly)
         let mut mks = Vec::with_capacity(skip + 1);
-        let (mut ckr, mk) = CP::kdf_ck(ckr);
+        let (mut ckr, mk) = CP::kdf_ck(ckr)?;
         mks.push(mk);
         for _ in 0..skip {
-            let cm = CP::kdf_ck(&ckr);
+            let cm = CP::kdf_ck(&ckr)?;
             ckr = cm.0;
             mks.push(cm.1);
         }
-        (ckr, mks)
+        Ok((ckr, mks))
     }
 
     // Concatenate `h` and `ad` in a single byte-vector.
@@ -634,23 +655,23 @@ pub mod mock {
         type ChainKey = [u8; 3];
         type MessageKey = [u8; 3];
 
-        fn diffie_hellman(us: &KeyPair, them: &PublicKey) -> u8 {
-            us.0[0].wrapping_add(them.0[0])
+        fn diffie_hellman(us: &KeyPair, them: &PublicKey) -> Result<u8, DRError> {
+            Ok(us.0[0].wrapping_add(them.0[0]))
         }
 
-        fn kdf_rk(rk: &[u8; 2], s: &u8) -> ([u8; 2], [u8; 3]) {
-            ([rk[0], *s], [rk[0], rk[1], 0])
+        fn kdf_rk(rk: &[u8; 2], s: &u8) -> Result<([u8; 2], [u8; 3]), DRError> {
+            Ok(([rk[0], *s], [rk[0], rk[1], 0]))
         }
 
-        fn kdf_ck(ck: &[u8; 3]) -> ([u8; 3], [u8; 3]) {
-            ([ck[0], ck[1], ck[2].wrapping_add(1)], *ck)
+        fn kdf_ck(ck: &[u8; 3]) -> Result<([u8; 3], [u8; 3]), DRError> {
+            Ok(([ck[0], ck[1], ck[2].wrapping_add(1)], *ck))
         }
 
-        fn encrypt(mk: &[u8; 3], pt: &[u8], ad: &[u8]) -> Vec<u8> {
+        fn encrypt(mk: &[u8; 3], pt: &[u8], ad: &[u8]) -> Result<Vec<u8>, EncryptError> {
             let mut ct = Vec::from(&mk[..]);
             ct.extend_from_slice(pt);
             ct.extend_from_slice(ad);
-            ct
+            Ok(ct)
         }
 
         fn decrypt(
@@ -659,7 +680,9 @@ pub mod mock {
             ad: &[u8],
         ) -> Result<Vec<u8>, crate::common::DecryptError> {
             if ct.len() < 3 + ad.len() || ct[..3] != mk[..] || !ct.ends_with(ad) {
-                Err(crate::common::DecryptError::DecryptFailure)
+                Err(crate::common::DecryptError::DecryptFailure(
+                    "Invalid parameters".into(),
+                ))
             } else {
                 Ok(Vec::from(&ct[3..ct.len() - ad.len()]))
             }
@@ -761,7 +784,7 @@ mod tests {
         let secret = [42, 0];
         let pair = mock::KeyPair::new(rng);
         let pubkey = pair.public().clone();
-        let alice = DR::new_alice(&secret, pubkey, None, rng);
+        let alice = DR::new_alice(&secret, pubkey, None, rng).unwrap();
         let bob = DR::new_bob(secret, pair, None);
         (alice, bob)
     }
@@ -771,7 +794,7 @@ mod tests {
         let ck_init = [42, 0, 0];
         let pair = mock::KeyPair::new(rng);
         let pubkey = pair.public().clone();
-        let alice = DR::new_alice(&secret, pubkey, Some(ck_init), rng);
+        let alice = DR::new_alice(&secret, pubkey, Some(ck_init), rng).unwrap();
         let bob = DR::new_bob(secret, pair, Some(ck_init));
         (alice, bob)
     }
@@ -784,9 +807,9 @@ mod tests {
         // Alice can encrypt, Bob can't
         let (pt_a, ad_a) = (b"Hi Bobby", b"A2B");
         let (pt_b, ad_b) = (b"What's up Al?", b"B2A");
-        let (h_a, ct_a) = alice.ratchet_encrypt(pt_a, ad_a, &mut rng);
+        let (h_a, ct_a) = alice.ratchet_encrypt(pt_a, ad_a, &mut rng).unwrap();
         assert_eq!(
-            Err(EncryptUninit),
+            Err(EncryptError::EncryptUninit),
             bob.try_ratchet_encrypt(pt_b, ad_b, &mut rng)
         );
         assert_eq!(
@@ -795,7 +818,7 @@ mod tests {
         );
 
         // but after decryption Bob can encrypt
-        let (h_b, ct_b) = bob.ratchet_encrypt(pt_b, ad_b, &mut rng);
+        let (h_b, ct_b) = bob.ratchet_encrypt(pt_b, ad_b, &mut rng).unwrap();
         assert_eq!(
             Ok(Vec::from(&pt_b[..])),
             alice.ratchet_decrypt(&h_b, &ct_b, ad_b)
@@ -810,8 +833,8 @@ mod tests {
         // Alice can encrypt, Bob can't
         let (pt_a, ad_a) = (b"Hi Bobby", b"A2B");
         let (pt_b, ad_b) = (b"What's up Al?", b"B2A");
-        let (h_a, ct_a) = alice.ratchet_encrypt(pt_a, ad_a, &mut rng);
-        let (h_b, ct_b) = bob.ratchet_encrypt(pt_b, ad_b, &mut rng);
+        let (h_a, ct_a) = alice.ratchet_encrypt(pt_a, ad_a, &mut rng).unwrap();
+        let (h_b, ct_b) = bob.ratchet_encrypt(pt_b, ad_b, &mut rng).unwrap();
         assert_eq!(
             Ok(Vec::from(&pt_a[..])),
             bob.ratchet_decrypt(&h_a, &ct_a, ad_a)
@@ -831,13 +854,13 @@ mod tests {
         // Alice can encrypt, Bob can't
         let (pt_a, ad_a) = (b"Hi Bobby", b"A2B");
         let (pt_b, ad_b) = (b"What's up Al?", b"B2A");
-        let (h_a, ct_a) = alice.ratchet_encrypt(pt_a, ad_a, &mut rng);
+        let (h_a, ct_a) = alice.ratchet_encrypt(pt_a, ad_a, &mut rng).unwrap();
         let alice_session_state = alice.session_state().encode().unwrap();
 
         let bob_session = SessionState::decode(&bob_session_state).unwrap();
         let mut bob = DR::try_from(&(bob_session, None)).unwrap();
         assert_eq!(
-            Err(EncryptUninit),
+            Err(EncryptError::EncryptUninit),
             bob.try_ratchet_encrypt(pt_b, ad_b, &mut rng)
         );
         assert_eq!(
@@ -846,7 +869,7 @@ mod tests {
         );
 
         // but after decryption Bob can encrypt
-        let (h_b, ct_b) = bob.ratchet_encrypt(pt_b, ad_b, &mut rng);
+        let (h_b, ct_b) = bob.ratchet_encrypt(pt_b, ad_b, &mut rng).unwrap();
         let alice_session = SessionState::decode(&alice_session_state).unwrap();
         let mut alice = DR::try_from(&(alice_session, None)).unwrap();
         assert_eq!(
@@ -863,12 +886,12 @@ mod tests {
 
         // Alice's message arrive out of order, some are even missing
         let pt_a_0 = b"Hi Bobby";
-        let (h_a_0, ct_a_0) = alice.ratchet_encrypt(pt_a_0, ad_a, &mut rng);
+        let (h_a_0, ct_a_0) = alice.ratchet_encrypt(pt_a_0, ad_a, &mut rng).unwrap();
         for _ in 1..9 {
-            alice.ratchet_encrypt(b"hello?", ad_a, &mut rng); // drop these messages
+            alice.ratchet_encrypt(b"hello?", ad_a, &mut rng).unwrap(); // drop these messages
         }
         let pt_a_9 = b"are you there?";
-        let (h_a_9, ct_a_9) = alice.ratchet_encrypt(pt_a_9, ad_a, &mut rng);
+        let (h_a_9, ct_a_9) = alice.ratchet_encrypt(pt_a_9, ad_a, &mut rng).unwrap();
         assert_eq!(
             Ok(Vec::from(&pt_a_9[..])),
             bob.ratchet_decrypt(&h_a_9, &ct_a_9, ad_a)
@@ -880,12 +903,12 @@ mod tests {
 
         // Bob's replies also arrive out of order
         let pt_b_0 = b"Yes I'm here";
-        let (h_b_0, ct_b_0) = bob.ratchet_encrypt(pt_b_0, ad_b, &mut rng);
+        let (h_b_0, ct_b_0) = bob.ratchet_encrypt(pt_b_0, ad_b, &mut rng).unwrap();
         for _ in 1..9 {
-            bob.ratchet_encrypt(b"why?", ad_b, &mut rng); // drop these messages
+            bob.ratchet_encrypt(b"why?", ad_b, &mut rng).unwrap(); // drop these messages
         }
         let pt_b_9 = b"Tell me why!!!";
-        let (h_b_9, ct_b_9) = bob.ratchet_encrypt(pt_b_9, ad_b, &mut rng);
+        let (h_b_9, ct_b_9) = bob.ratchet_encrypt(pt_b_9, ad_b, &mut rng).unwrap();
         assert_eq!(
             Ok(Vec::from(&pt_b_9[..])),
             alice.ratchet_decrypt(&h_b_9, &ct_b_9, ad_b)
@@ -903,27 +926,27 @@ mod tests {
         let (ad_a, ad_b) = (b"A2B", b"B2A");
 
         let pt_a_0 = b"Good day Robert";
-        let (h_a_0, ct_a_0) = alice.ratchet_encrypt(pt_a_0, ad_a, &mut rng);
+        let (h_a_0, ct_a_0) = alice.ratchet_encrypt(pt_a_0, ad_a, &mut rng).unwrap();
         assert_eq!(
             Ok(Vec::from(&pt_a_0[..])),
             bob.ratchet_decrypt(&h_a_0, &ct_a_0, ad_a)
         );
         let pt_a_1 = b"Do you like Rust?";
-        let (h_a_1, ct_a_1) = alice.ratchet_encrypt(pt_a_1, ad_a, &mut rng);
+        let (h_a_1, ct_a_1) = alice.ratchet_encrypt(pt_a_1, ad_a, &mut rng).unwrap();
         // Bob misses pt_a_1
 
         let pt_b_0 = b"Salutations Allison";
-        let (h_b_0, ct_b_0) = bob.ratchet_encrypt(pt_b_0, ad_b, &mut rng);
+        let (h_b_0, ct_b_0) = bob.ratchet_encrypt(pt_b_0, ad_b, &mut rng).unwrap();
         // Alice misses pt_b_0
         let pt_b_1 = b"How is your day going?";
-        let (h_b_1, ct_b_1) = bob.ratchet_encrypt(pt_b_1, ad_b, &mut rng);
+        let (h_b_1, ct_b_1) = bob.ratchet_encrypt(pt_b_1, ad_b, &mut rng).unwrap();
         assert_eq!(
             Ok(Vec::from(&pt_b_1[..])),
             alice.ratchet_decrypt(&h_b_1, &ct_b_1, ad_b)
         );
 
         let pt_a_2 = b"My day is fine.";
-        let (h_a_2, ct_a_2) = alice.ratchet_encrypt(pt_a_2, ad_a, &mut rng);
+        let (h_a_2, ct_a_2) = alice.ratchet_encrypt(pt_a_2, ad_a, &mut rng).unwrap();
         assert_eq!(
             Ok(Vec::from(&pt_a_2[..])),
             bob.ratchet_decrypt(&h_a_2, &ct_a_2, ad_a)
@@ -935,7 +958,7 @@ mod tests {
         );
 
         let pt_b_2 = b"Yes I like Rust";
-        let (h_b_2, ct_b_2) = bob.ratchet_encrypt(pt_b_2, ad_b, &mut rng);
+        let (h_b_2, ct_b_2) = bob.ratchet_encrypt(pt_b_2, ad_b, &mut rng).unwrap();
         assert_eq!(
             Ok(Vec::from(&pt_b_2[..])),
             alice.ratchet_decrypt(&h_b_2, &ct_b_2, ad_b)
@@ -954,10 +977,10 @@ mod tests {
         let (_alice, mut bob) = asymmetric_setup(&mut rng);
 
         assert_eq!(
-            Err(EncryptUninit),
+            Err(EncryptError::EncryptUninit),
             bob.try_ratchet_encrypt(b"", b"", &mut rng)
         );
-        bob.ratchet_encrypt(b"", b"", &mut rng);
+        bob.ratchet_encrypt(b"", b"", &mut rng).unwrap();
     }
 
     #[test]
@@ -967,63 +990,91 @@ mod tests {
         let (ad_a, ad_b) = (b"A2B", b"B2A");
 
         // Next chain
-        let (h_a_0, ct_a_0) = alice.ratchet_encrypt(b"Hi Bob", ad_a, &mut rng);
+        let (h_a_0, ct_a_0) = alice.ratchet_encrypt(b"Hi Bob", ad_a, &mut rng).unwrap();
         let mut ct_a_0_err = ct_a_0.clone();
         ct_a_0_err[2] ^= 0x80;
         let mut h_a_0_err = h_a_0.clone();
         h_a_0_err.pn = 1;
-        assert_eq!(
-            Err(DecryptError::DecryptFailure),
-            bob.ratchet_decrypt(&h_a_0, &ct_a_0_err, ad_a)
+
+        assert!(
+            matches!(
+                bob.ratchet_decrypt(&h_a_0, &ct_a_0_err, ad_a),
+                Err(DecryptError::DecryptFailure(_))
+            ),
+            "Expected DecryptFailure, but got something else"
         );
-        assert_eq!(
-            Err(DecryptError::DecryptFailure),
-            bob.ratchet_decrypt(&h_a_0_err, &ct_a_0, ad_a)
+        assert!(
+            matches!(
+                bob.ratchet_decrypt(&h_a_0_err, &ct_a_0, ad_a),
+                Err(DecryptError::DecryptFailure(_))
+            ),
+            "Expected DecryptFailure, but got something else"
         );
-        assert_eq!(
-            Err(DecryptError::DecryptFailure),
-            bob.ratchet_decrypt(&h_a_0, &ct_a_0, ad_b)
+        assert!(
+            matches!(
+                bob.ratchet_decrypt(&h_a_0, &ct_a_0, ad_b),
+                Err(DecryptError::DecryptFailure(_))
+            ),
+            "Expected DecryptFailure, but got something else"
         );
 
         // Current Chain
-        let (h_a_1, ct_a_1) = alice.ratchet_encrypt(b"Hi Bob", ad_a, &mut rng);
+        let (h_a_1, ct_a_1) = alice.ratchet_encrypt(b"Hi Bob", ad_a, &mut rng).unwrap();
         bob.ratchet_decrypt(&h_a_1, &ct_a_1, ad_a).unwrap();
-        let (h_a_2, ct_a_2) = alice.ratchet_encrypt(b"Hi Bob", ad_a, &mut rng);
+        let (h_a_2, ct_a_2) = alice.ratchet_encrypt(b"Hi Bob", ad_a, &mut rng).unwrap();
         let mut h_a_2_err = h_a_2.clone();
         h_a_2_err.pn += 1;
         let mut ct_a_2_err = ct_a_2.clone();
         ct_a_2_err[0] ^= 0x04;
 
-        assert_eq!(
-            Err(DecryptError::DecryptFailure),
-            bob.ratchet_decrypt(&h_a_2, &ct_a_2_err, ad_a)
+        assert!(
+            matches!(
+                bob.ratchet_decrypt(&h_a_2, &ct_a_2_err, ad_a),
+                Err(DecryptError::DecryptFailure(_))
+            ),
+            "Expected DecryptFailure, but got something else"
         );
-        assert_eq!(
-            Err(DecryptError::DecryptFailure),
-            bob.ratchet_decrypt(&h_a_2_err, &ct_a_2, ad_a)
+        assert!(
+            matches!(
+                bob.ratchet_decrypt(&h_a_2_err, &ct_a_2, ad_a),
+                Err(DecryptError::DecryptFailure(_))
+            ),
+            "Expected DecryptFailure, but got something else"
         );
-        assert_eq!(
-            Err(DecryptError::DecryptFailure),
-            bob.ratchet_decrypt(&h_a_2, &ct_a_2, ad_b)
+        assert!(
+            matches!(
+                bob.ratchet_decrypt(&h_a_2, &ct_a_2, ad_b),
+                Err(DecryptError::DecryptFailure(_))
+            ),
+            "Expected DecryptFailure, but got something else"
         );
 
         // Previous chain
-        let (h_b, ct_b) = bob.ratchet_encrypt(b"Hi Alice", ad_b, &mut rng);
+        let (h_b, ct_b) = bob.ratchet_encrypt(b"Hi Alice", ad_b, &mut rng).unwrap();
         alice.ratchet_decrypt(&h_b, &ct_b, ad_b).unwrap();
-        let (h_a_3, ct_a_3) = alice.ratchet_encrypt(b"Hi Bob", ad_a, &mut rng);
+        let (h_a_3, ct_a_3) = alice.ratchet_encrypt(b"Hi Bob", ad_a, &mut rng).unwrap();
         bob.ratchet_decrypt(&h_a_3, &ct_a_3, ad_a).unwrap();
 
-        assert_eq!(
-            Err(DecryptError::DecryptFailure),
-            bob.ratchet_decrypt(&h_a_2, &ct_a_2_err, ad_a)
+        assert!(
+            matches!(
+                bob.ratchet_decrypt(&h_a_2, &ct_a_2_err, ad_a),
+                Err(DecryptError::DecryptFailure(_))
+            ),
+            "Expected DecryptFailure, but got something else"
         );
-        assert_eq!(
-            Err(DecryptError::DecryptFailure),
-            bob.ratchet_decrypt(&h_a_2_err, &ct_a_2, ad_a)
+        assert!(
+            matches!(
+                bob.ratchet_decrypt(&h_a_2_err, &ct_a_2, ad_a),
+                Err(DecryptError::DecryptFailure(_))
+            ),
+            "Expected DecryptFailure, but got something else"
         );
-        assert_eq!(
-            Err(DecryptError::DecryptFailure),
-            bob.ratchet_decrypt(&h_a_2, &ct_a_2, ad_b)
+        assert!(
+            matches!(
+                bob.ratchet_decrypt(&h_a_2, &ct_a_2, ad_b),
+                Err(DecryptError::DecryptFailure(_))
+            ),
+            "Expected DecryptFailure, but got something else"
         );
     }
 
@@ -1036,17 +1087,17 @@ mod tests {
         let (mut alice, mut bob) = asymmetric_setup(&mut rng);
         let (ad_a, ad_b) = (b"A2B", b"B2A");
 
-        let (h_a_0, ct_a_0) = alice.ratchet_encrypt(b"Whatever", ad_a, &mut rng);
+        let (h_a_0, ct_a_0) = alice.ratchet_encrypt(b"Whatever", ad_a, &mut rng).unwrap();
         bob.ratchet_decrypt(&h_a_0, &ct_a_0, ad_a).unwrap();
         assert!(bob.ratchet_decrypt(&h_a_0, &ct_a_0, ad_a).is_err());
 
-        let (h_b_0, ct_b_0) = bob.ratchet_encrypt(b"Whatever", ad_b, &mut rng);
+        let (h_b_0, ct_b_0) = bob.ratchet_encrypt(b"Whatever", ad_b, &mut rng).unwrap();
         alice.ratchet_decrypt(&h_b_0, &ct_b_0, ad_b).unwrap();
         assert!(alice.ratchet_decrypt(&h_b_0, &ct_b_0, ad_b).is_err());
-        let (h_a_1, ct_a_1) = alice.ratchet_encrypt(b"Whatever", ad_a, &mut rng);
+        let (h_a_1, ct_a_1) = alice.ratchet_encrypt(b"Whatever", ad_a, &mut rng).unwrap();
         bob.ratchet_decrypt(&h_a_1, &ct_a_1, ad_a).unwrap();
         assert!(bob.ratchet_decrypt(&h_a_1, &ct_a_1, ad_a).is_err());
-        let (h_b_1, ct_b_1) = bob.ratchet_encrypt(b"Whatever", ad_b, &mut rng);
+        let (h_b_1, ct_b_1) = bob.ratchet_encrypt(b"Whatever", ad_b, &mut rng).unwrap();
         alice.ratchet_decrypt(&h_b_1, &ct_b_1, ad_b).unwrap();
         assert!(alice.ratchet_decrypt(&h_b_1, &ct_b_1, ad_b).is_err());
 
@@ -1059,11 +1110,13 @@ mod tests {
         let mut rng = mock::Rng::default();
         let (mut alice, mut bob) = asymmetric_setup(&mut rng);
         let (ad_a, ad_b) = (b"A2B", b"B2A");
-        let (h_a_0, ct_a_0) = alice.ratchet_encrypt(b"Hi Bob", ad_a, &mut rng);
+        let (h_a_0, ct_a_0) = alice.ratchet_encrypt(b"Hi Bob", ad_a, &mut rng).unwrap();
         bob.ratchet_decrypt(&h_a_0, &ct_a_0, ad_a).unwrap();
-        let (h_b_0, ct_b_0) = bob.ratchet_encrypt(b"Hi Alice", ad_b, &mut rng);
+        let (h_b_0, ct_b_0) = bob.ratchet_encrypt(b"Hi Alice", ad_b, &mut rng).unwrap();
         alice.ratchet_decrypt(&h_b_0, &ct_b_0, ad_b).unwrap();
-        let (mut h_a_1, ct_a_1) = alice.ratchet_encrypt(b"I will lie to you now", ad_a, &mut rng);
+        let (mut h_a_1, ct_a_1) = alice
+            .ratchet_encrypt(b"I will lie to you now", ad_a, &mut rng)
+            .unwrap();
         assert_eq!(h_a_1.pn, 1);
         h_a_1.pn = 0;
         assert!(bob.ratchet_decrypt(&h_a_1, &ct_a_1, ad_a).is_err());
@@ -1074,19 +1127,25 @@ mod tests {
         let mut rng = mock::Rng::default();
         let (mut alice, mut bob) = asymmetric_setup(&mut rng);
         let (ad_a, ad_b) = (b"A2B", b"B2A");
-        let (h_a_0, ct_a_0) = alice.ratchet_encrypt(b"Hi Bob", ad_a, &mut rng);
+        let (h_a_0, ct_a_0) = alice.ratchet_encrypt(b"Hi Bob", ad_a, &mut rng).unwrap();
         for _ in 0..=alice.max_skip() {
-            alice.ratchet_encrypt(b"Not sending this", ad_a, &mut rng);
+            alice
+                .ratchet_encrypt(b"Not sending this", ad_a, &mut rng)
+                .unwrap();
         }
-        let (h_a_1, ct_a_1) = alice.ratchet_encrypt(b"n > MAXSKIP", ad_a, &mut rng);
+        let (h_a_1, ct_a_1) = alice
+            .ratchet_encrypt(b"n > MAXSKIP", ad_a, &mut rng)
+            .unwrap();
         assert_eq!(
             Err(DecryptError::SkipTooLarge),
             bob.ratchet_decrypt(&h_a_1, &ct_a_1, ad_a)
         );
         bob.ratchet_decrypt(&h_a_0, &ct_a_0, ad_a).unwrap();
-        let (h_b, ct_b) = bob.ratchet_encrypt(b"Hi Alice", ad_b, &mut rng);
+        let (h_b, ct_b) = bob.ratchet_encrypt(b"Hi Alice", ad_b, &mut rng).unwrap();
         alice.ratchet_decrypt(&h_b, &ct_b, ad_b).unwrap();
-        let (h_a_2, ct_a_2) = alice.ratchet_encrypt(b"pn > MAXSKIP", ad_a, &mut rng);
+        let (h_a_2, ct_a_2) = alice
+            .ratchet_encrypt(b"pn > MAXSKIP", ad_a, &mut rng)
+            .unwrap();
         assert_eq!(
             Err(DecryptError::SkipTooLarge),
             bob.ratchet_decrypt(&h_a_2, &ct_a_2, ad_a)
@@ -1103,9 +1162,11 @@ mod tests {
         let mks_capacity = alice.msg_key_cache.max_capacity(); //aka DEFAULT_MKS_CAPACITY
         while stored < mks_capacity {
             for _ in 0..cmp::min(alice.max_skip(), mks_capacity - stored) {
-                alice.ratchet_encrypt(b"Not sending this", ad_a, &mut rng);
+                alice
+                    .ratchet_encrypt(b"Not sending this", ad_a, &mut rng)
+                    .unwrap();
             }
-            let (h_a, ct_a) = alice.ratchet_encrypt(b"Hello Bob", ad_a, &mut rng);
+            let (h_a, ct_a) = alice.ratchet_encrypt(b"Hello Bob", ad_a, &mut rng).unwrap();
             bob.ratchet_decrypt(&h_a, &ct_a, ad_a).unwrap();
             stored += bob.max_skip();
             // We need to downcast the trait object *inside* the Arc.
@@ -1121,8 +1182,12 @@ mod tests {
                 .map(|hm| hm.len())
                 .sum::<usize>();
         }
-        alice.ratchet_encrypt(b"Bob can't store this key anymore", ad_a, &mut rng);
-        let (h_a, ct_a) = alice.ratchet_encrypt(b"Gotcha, Bob!", ad_a, &mut rng);
+        alice
+            .ratchet_encrypt(b"Bob can't store this key anymore", ad_a, &mut rng)
+            .unwrap();
+        let (h_a, ct_a) = alice
+            .ratchet_encrypt(b"Gotcha, Bob!", ad_a, &mut rng)
+            .unwrap();
         assert_eq!(
             Err(DecryptError::StorageFull),
             bob.ratchet_decrypt(&h_a, &ct_a, ad_a)
@@ -1140,17 +1205,25 @@ mod tests {
         let (mut alice, mut bob) = symmetric_setup(&mut rng);
         alice.pn = 10;
         bob.pn = 10;
-        let (h_a, ct_a) = alice.ratchet_encrypt(b"not important", ad_a, &mut rng);
-        let (h_b, ct_b) = bob.ratchet_encrypt(b"not important", ad_b, &mut rng);
+        let (h_a, ct_a) = alice
+            .ratchet_encrypt(b"not important", ad_a, &mut rng)
+            .unwrap();
+        let (h_b, ct_b) = bob
+            .ratchet_encrypt(b"not important", ad_b, &mut rng)
+            .unwrap();
         let _ = alice.ratchet_decrypt(&h_b, &ct_b, ad_b);
         let _ = bob.ratchet_decrypt(&h_a, &ct_a, ad_a);
 
         let (mut alice, mut bob) = asymmetric_setup(&mut rng);
         alice.pn = 10;
-        let (h_a, ct_a) = alice.ratchet_encrypt(b"not important", ad_a, &mut rng);
+        let (h_a, ct_a) = alice
+            .ratchet_encrypt(b"not important", ad_a, &mut rng)
+            .unwrap();
         let _ = bob.ratchet_decrypt(&h_a, &ct_a, ad_a);
         bob.pn = 10;
-        let (h_b, ct_b) = bob.ratchet_encrypt(b"not important", ad_b, &mut rng);
+        let (h_b, ct_b) = bob
+            .ratchet_encrypt(b"not important", ad_b, &mut rng)
+            .unwrap();
         let _ = alice.ratchet_decrypt(&h_b, &ct_b, ad_b);
     }
 }
