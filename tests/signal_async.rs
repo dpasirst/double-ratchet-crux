@@ -5,8 +5,7 @@
 //! of the [Signal application](https://signal.org/) but I suspect that it is.
 //!
 //! For the public key cryptography part of the `CryptoProvider` I used the
-//! [x25519-dalek](https://docs.rs/x25519-dalek/) crate. The implementation boils down to thin
-//! wrappers around the provided types and methods. For the symmetric part I created
+//! [libcrux](https://github.com/cryspen/libcrux) crate. For the symmetric part I created
 //! `SymmetricKey`: a newtype wrapper around a 32-byte array. A fully secure implementation of the
 //! `DoubleRatchet` may take extra steps to provide security, including but not limited to the
 //! examples I have implemented here:
