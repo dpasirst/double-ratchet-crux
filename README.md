@@ -108,7 +108,7 @@ The documentation is not yet available outside of the github repo.
 
 This version of double-ratchet was modified to support libcrux's formally verified cryptography. Not all of libcrux is formally verified and additional changes may be required.
 
-I also hope to use this as a base reference for a future `spqr` implementation.
+I also hope to use this as a base reference for a future `SPQR` implementation.
 
 
 [aead]: https://en.wikipedia.org/wiki/Authenticated_encryption#Authenticated_encryption_with_associated_data_(AEAD)
