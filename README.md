@@ -1,8 +1,14 @@
-# Double Ratchet
+# Double Ratchet Crux
 
-[![](https://img.shields.io/crates/v/double-ratchet.svg)][crates]
-[![](https://docs.rs/double-ratchet/badge.svg)][docs]
-[![](https://api.travis-ci.org/sebastianv89/double-ratchet.svg)](https://travis-ci.org/sebastianv89/double-ratchet)
+<!-- [![](https://img.shields.io/crates/v/double-ratchet.svg)][crates] -->
+<!-- [![](https://docs.rs/double-ratchet/badge.svg)][docs] -->
+
+This is a fork of the [double-ratchet][dr-verschoor] crate originally by S.R. Verschoor.
+
+This fork is modified from the original crate with several new capabilities, new crypto library dependencies, and some function signature changes.
+* Function signatures have been modified to exposes errors for handling that may be returned by `libcrux`.
+* Both sync and async implementations are offered. Async may be useful for a custom message key cache.
+* The `signal.rs` example/test code was modified to use [libcrux][libcrux] for the cryptography implementations. It was also updated from aes cbc to gcm. While this follows Signal's public specifications for double-ratchet, we have not tested to confirm if it can communicate with Signal's app.
 
 
 A pure Rust implementation of the Double Ratchet, as [specified][specs] by
@@ -41,7 +47,7 @@ let mut rng = OsRng::new().unwrap();
 type DR = DoubleRatchet<SignalCryptoProvider>;
 
 // Alice intializes and sends the first message
-let mut alice = DR::new_alice(&SK, bobs_public_prekey, None, &mut rng);
+let mut alice = DR::new_alice(&SK, bobs_public_prekey, None, &mut rng)?;
 let pt0 = b"Hello Bob";
 let (h0, ct0) = alice.ratchet_encrypt(pt0, b"A2B", &mut rng);
 
@@ -54,63 +60,64 @@ assert_eq!(
 
 // After receiving the first message, Bob can send his replies
 let pt1 = b"Hi Alice";
-let (h1, ct1) = alice.ratchet_encrypt(pt1, b"B2A", &mut rng);
+let (h1, ct1) = alice.ratchet_encrypt(pt1, b"B2A", &mut rng)?;
 let pt2 = b"How are you?";
-let (h2, ct2) = bob.ratchet_encrypt(pt2, b"B2A", &mut rng);
+let (h2, ct2) = bob.ratchet_encrypt(pt2, b"B2A", &mut rng)?;
 assert_eq!(
     Ok(Vec::from(&pt_b_0[..])),
-    alice.ratchet_decrypt(&h_b_0, &ct_b_0, b"B2A")
+    alice.ratchet_decrypt(&h_b_0, &ct_b_0, b"B2A")?
 );
 
 // Note that Alice has not yet received Bob's first message...
 let pt3 = b"Good and you?";
-let (h3, ct3) = alice.ratchet_encrypt(pt3, b"A2B", &mut rng);
+let (h3, ct3) = alice.ratchet_encrypt(pt3, b"A2B", &mut rng)?;
 assert_eq!(
     Ok(Vec::from(&pt3[..])),
-    bob.ratchet_decrypt(&h3, &ct3, b"A2B")
+    bob.ratchet_decrypt(&h3, &ct3, b"A2B")?
 );
 // ...but when she does get it she will be able to decrypt
 assert_eq!(
     Ok(Vec::from(&pt1[..])),
-    alice.ratchet_decrypt(&h1, &ct1, b"B2A")
+    alice.ratchet_decrypt(&h1, &ct1, b"B2A")?
 );
 ```
 
 
 ## Installation
 
-The Double Ratchet crate is distributed through [crates.io][crates]: install it
+The Double Ratchet Crux crate is not yet distributed through `crates.io`: install it
 by adding the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-double-ratchet = "0.1"
+double-ratchet-crux = { git = "https://github.com/dpasirst/double-ratchet-crux" }
 ```
 
 The `std` feature is enabled by default. If you don't want to use `std`, compile with `--no-default-features`.
 
+The `serde` feature is enabled by default. If you don't want to use `serde`, compile with `--no-default-features`.
+
+The `async` feature is disabled by default. If you do want to use `async`, you must add that feature to the `Cargo.toml` for `double-ratchet-crux`.
 
 ## Documentation
 
-The documentation is available [here][docs].
-
+<!-- The documentation is available [here][docs]. -->
+The documentation is not yet available outside of the github repo.
 
 ## Future plans
 
-This isn't even my final form! I intend to add at least the following features
-and am open for suggestions for more features.
+This version of double-ratchet was modified to support libcrux's formally verified cryptography. Not all of libcrux is formally verified and additional changes may be required.
 
-- [ ] a Header Encrypted variant of the Double Ratchet
-- [ ] generalize the `KeyStore` to allow automatic deletion of very old keys
-- [ ] provide a way for saving/restoring a `DoubleRatchet` to storage
-- [ ] Provide a non-allocating interface for encryption/decryption
+I also hope to use this as a base reference for a future `spqr` implementation.
 
 
 [aead]: https://en.wikipedia.org/wiki/Authenticated_encryption#Authenticated_encryption_with_associated_data_(AEAD)
 [crates]: https://crates.io/crates/double-ratchet
 [dh]: https://en.wikipedia.org/wiki/Diffie-Hellman_key_exchange
 [docs]: https://docs.rs/double-ratchet
+[dr-verschoor]: https://crates.io/crates/double-ratchet
 [kdf]: https://en.wikipedia.org/wiki/Key_derivation_function
+[libcrux]: https://github.com/cryspen/libcrux
 [signal]: https://signal.org/
 [specs]: https://signal.org/docs/specifications/doubleratchet/
 

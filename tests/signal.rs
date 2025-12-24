@@ -1,5 +1,5 @@
 //! The `SignalDoubleRatchet` provides an example of a secure implementation of the
-//! `double_ratchet::CryptoProvider`. This example code is based on the recommended cryptographic
+//! `double_ratchet_crux::CryptoProvider`. This example code is based on the recommended cryptographic
 //! algorithms of the [specification]. I have not checked if the code is fully compatible with that
 //! of the [Signal application](https://signal.org/) but I suspect that it is.
 //!
@@ -26,7 +26,7 @@
 //! [specification]: https://signal.org/docs/specifications/doubleratchet/#recommended-cryptographic-algorithms
 
 use clear_on_drop::clear::Clear;
-use double_ratchet::{self as dr, DRError, DecryptError, EncryptError, KeyPair as _};
+use double_ratchet_crux::{self as dr, DRError, DecryptError, EncryptError, KeyPair as _};
 
 // use libcrux:: {
 //     // we can't (yet? ever?) use the next line for anything other than x86_64
@@ -45,7 +45,7 @@ use std::convert::TryInto;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
-pub type SignalDR = double_ratchet::sync::DoubleRatchet<SignalCryptoProvider>;
+pub type SignalDR = double_ratchet_crux::sync::DoubleRatchet<SignalCryptoProvider>;
 
 type SharedSecret = Vec<u8>;
 
