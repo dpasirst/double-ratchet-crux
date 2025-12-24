@@ -26,27 +26,30 @@
 //! [`clear_on_drop`]: https://crates.io/crates/clear_on_drop
 //! [specification]: https://signal.org/docs/specifications/doubleratchet/#recommended-cryptographic-algorithms
 
-use aes::Aes256;
 use async_trait::async_trait;
-use cbc::cipher::block_padding::Pkcs7;
-use cipher::generic_array::{typenum::U32, GenericArray};
-use cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
 use clear_on_drop::clear::Clear;
-use double_ratchet::{self as dr, DRError, DecryptError, KeyPair as _};
-use hkdf::Hkdf;
-use hmac::{Hmac, Mac};
-use rand_core::{CryptoRng, OsRng, RngCore};
-use sha2::Sha256;
+use double_ratchet::{self as dr, DRError, DecryptError, EncryptError, KeyPair as _};
+
+// use libcrux:: {
+//     // we can't (yet? ever?) use the next line for anything other than x86_64
+//     // https://hacl-star.github.io/Supported.html#list-of-supported-algorithms
+//     // https://github.com/cryspen/libcrux/issues/1269
+//     //aead::{Iv, Key, Tag, encrypt_detached as aes256gcm_encrypt, decrypt_detached as aes256gcm_decrypt},
+// };
+use libcrux_aesgcm::{
+    AesGcm256Key, AesGcm256Nonce, AesGcm256Tag, AESGCM256_KEY_LEN, NONCE_LEN, TAG_LEN,
+};
+use libcrux_hkdf::hkdf;
+use libcrux_hmac::hmac;
+
+use rand_core::CryptoRng;
 use std::convert::TryInto;
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use subtle::ConstantTimeEq;
-use x25519_dalek::{self, SharedSecret};
 
 pub type SignalDR = double_ratchet::async_::DoubleRatchet<SignalCryptoProvider>;
 
-type Aes256CbcEnc = cbc::Encryptor<Aes256>;
-type Aes256CbcDec = cbc::Decryptor<Aes256>;
+type SharedSecret = Vec<u8>;
 
 pub struct SignalCryptoProvider;
 
@@ -60,136 +63,203 @@ impl dr::CryptoProvider for SignalCryptoProvider {
     type ChainKey = SymmetricKey;
     type MessageKey = SymmetricKey;
 
-    fn diffie_hellman(us: &KeyPair, them: &PublicKey) -> SharedSecret {
-        us.private.diffie_hellman(&them.0)
+    fn diffie_hellman(us: &KeyPair, them: &PublicKey) -> Result<SharedSecret, DRError> {
+        // note: decapsulate(alg, point (public), scalar (private)) -> shared secret
+        libcrux_ecdh::derive(libcrux_ecdh::Algorithm::X25519, &them.0, &us.private)
+            .map_err(|e| DRError::KeyAgreementFailure(format!("{:?}", e).into()))
     }
 
-    fn kdf_rk(rk: &SymmetricKey, s: &SharedSecret) -> (SymmetricKey, SymmetricKey) {
-        let salt = Some(rk.0.as_slice());
-        let ikm = s.as_bytes();
-        let prk = Hkdf::<Sha256>::new(salt, ikm);
+    fn kdf_rk(
+        rk: &SymmetricKey,
+        s: &SharedSecret,
+    ) -> Result<(SymmetricKey, SymmetricKey), DRError> {
+        let salt = rk.0.as_slice();
+        let ikm = s;
         let info = &b"WhisperRatchet"[..];
         let mut okm = [0; 64];
-        prk.expand(&info, &mut okm).unwrap();
-        let rk = GenericArray::<u8, U32>::clone_from_slice(&okm[..32]);
-        let ck = GenericArray::<u8, U32>::clone_from_slice(&okm[32..]);
-        (SymmetricKey(rk), SymmetricKey(ck))
+        hkdf(libcrux_hkdf::Algorithm::Sha256, &mut okm, salt, ikm, info)
+            .map_err(|e| DRError::KeyDerivationFunction(format!("kdf_rk {:?}", e).into()))?;
+        Ok((
+            SymmetricKey::from(
+                &okm[..32].try_into().map_err(|e| {
+                    DRError::KeyDerivationFunction(format!("kdf_rk {:?}", e).into())
+                })?,
+            ),
+            SymmetricKey::from(
+                &okm[32..].try_into().map_err(|e| {
+                    DRError::KeyDerivationFunction(format!("kdf_rk {:?}", e).into())
+                })?,
+            ),
+        ))
     }
 
-    fn kdf_ck(ck: &SymmetricKey) -> (SymmetricKey, SymmetricKey) {
+    fn kdf_ck(ck: &SymmetricKey) -> Result<(SymmetricKey, SymmetricKey), DRError> {
         let key = ck.0.as_slice();
-        let mut mac = Hmac::<Sha256>::new_from_slice(key).unwrap();
-        mac.update(&[0x01]);
-        let mk = mac.finalize().into_bytes();
-        let mut mac = Hmac::<Sha256>::new_from_slice(key).unwrap();
-        mac.update(&[0x02]);
-        let ck = mac.finalize().into_bytes();
-        (SymmetricKey(ck), SymmetricKey(mk))
+        let mk = hmac(libcrux_hmac::Algorithm::Sha256, key, &[0x01], Some(32));
+        let ck = hmac(libcrux_hmac::Algorithm::Sha256, key, &[0x02], Some(32));
+        Ok((
+            SymmetricKey(
+                ck.try_into().map_err(|e| {
+                    DRError::KeyDerivationFunction(format!("kdf_ck {:?}", e).into())
+                })?,
+            ),
+            SymmetricKey(
+                mk.try_into().map_err(|e| {
+                    DRError::KeyDerivationFunction(format!("kdf_ck {:?}", e).into())
+                })?,
+            ),
+        ))
     }
 
-    fn encrypt(key: &SymmetricKey, pt: &[u8], ad: &[u8]) -> Vec<u8> {
+    fn encrypt(key: &SymmetricKey, pt: &[u8], ad: &[u8]) -> Result<Vec<u8>, EncryptError> {
         let ikm = key.0.as_slice();
-        let prk = Hkdf::<Sha256>::new(None, ikm);
         let info = b"WhisperMessageKeys";
         let mut okm = [0; 80];
-        prk.expand(info, &mut okm).unwrap();
-        let ek = GenericArray::clone_from_slice(&okm[..32]);
-        let mk: GenericArray<u8, U32> = GenericArray::clone_from_slice(&okm[32..64]);
-        let iv = GenericArray::clone_from_slice(&okm[64..]);
-        let cipher = Aes256CbcEnc::new(&ek, &iv);
-        let mut ct = cipher.encrypt_padded_vec_mut::<Pkcs7>(pt);
-        let mut mac = Hmac::<Sha256>::new_from_slice(&mk).unwrap();
-        mac.update(ad);
-        mac.update(&ct);
-        let tag = mac.finalize().into_bytes();
-        ct.extend((&tag[..8]).into_iter());
+        hkdf(libcrux_hkdf::Algorithm::Sha256, &mut okm, b"", ikm, info).map_err(|err| {
+            EncryptError::EncryptFailure(format!("hkdf failed: {:?}", err).into())
+        })?;
+        let ek = &okm[..AESGCM256_KEY_LEN].try_into().unwrap();
+        let iv = &okm[AESGCM256_KEY_LEN..(AESGCM256_KEY_LEN + NONCE_LEN)]
+            .try_into() // 12
+            .map_err(|err| EncryptError::EncryptFailure(format!("{err}").into()))?;
 
-        okm.clear();
-        ct
+        // the following lines are commented out but here for reference. The show how to use
+        // libcrux aead impl which currently only works on x86_64
+        // let iv = Iv::new(iv).unwrap();
+        // let aes_key = Key::from_slice(libcrux::aead::Algorithm::Aes256Gcm, ek).unwrap();
+        // let (tag, mut ct) = aes256gcm_encrypt(&aes_key, pt, iv, ad).unwrap();
+        let k: AesGcm256Key = <[u8; AESGCM256_KEY_LEN] as Into<AesGcm256Key>>::into(*ek);
+        let nonce: AesGcm256Nonce = <[u8; NONCE_LEN] as Into<AesGcm256Nonce>>::into(*iv);
+        let mut tag: AesGcm256Tag = [0; TAG_LEN].into();
+
+        let mut ct = vec![0u8; pt.len()];
+        if let Err(err) = k.encrypt(&mut ct, &mut tag, &nonce, ad, pt) {
+            okm.clear();
+            Err(EncryptError::EncryptFailure(format!("{err}").into()))
+        } else {
+            ct.extend(&tag.as_ref()[..TAG_LEN]);
+            okm.clear();
+            Ok(ct)
+        }
     }
 
     fn decrypt(key: &SymmetricKey, ct: &[u8], ad: &[u8]) -> Result<Vec<u8>, DecryptError> {
         let ikm = key.0.as_slice();
-        let prk = Hkdf::<Sha256>::new(None, ikm);
         let info = b"WhisperMessageKeys";
         let mut okm = [0; 80];
-        prk.expand(info, &mut okm).unwrap();
-        let dk = GenericArray::clone_from_slice(&okm[..32]);
-        let mk: GenericArray<u8, U32> = GenericArray::clone_from_slice(&okm[32..64]);
-        let iv = GenericArray::clone_from_slice(&okm[64..]);
+        hkdf(libcrux_hkdf::Algorithm::Sha256, &mut okm, b"", ikm, info)
+            .map_err(|err| DecryptError::DecryptFailure(format!("{:?}", err).into()))?;
 
-        let ct_len = ct.len() - 8;
-        let mut mac = Hmac::<Sha256>::new_from_slice(&mk).unwrap();
-        mac.update(ad);
-        mac.update(&ct[..ct_len]);
-        let tag = mac.finalize().into_bytes();
-        if bool::from(!(&tag[..8]).ct_eq(&ct[ct_len..])) {
+        let dk = &okm[..AESGCM256_KEY_LEN]
+            .try_into()
+            .map_err(|err| DecryptError::DecryptFailure(format!("{err}").into()))?;
+
+        let iv = &okm[AESGCM256_KEY_LEN..(AESGCM256_KEY_LEN + NONCE_LEN)]
+            .try_into()
+            .map_err(|err| DecryptError::DecryptFailure(format!("{err}").into()))?;
+
+        let mut pt = vec![0u8; ct.len() - TAG_LEN];
+
+        let ct_len = ct.len() - TAG_LEN;
+        let k: AesGcm256Key = <[u8; AESGCM256_KEY_LEN] as Into<AesGcm256Key>>::into(*dk);
+        let nonce: AesGcm256Nonce = <[u8; NONCE_LEN] as Into<AesGcm256Nonce>>::into(*iv);
+        let tag: AesGcm256Tag = <[u8; TAG_LEN] as Into<AesGcm256Tag>>::into(
+            ct[ct_len..]
+                .try_into()
+                .map_err(|err| DecryptError::DecryptFailure(format!("{err}").into()))?,
+        );
+
+        if let Err(err) = k.decrypt(&mut pt, &nonce, ad, &ct[..ct_len], &tag) {
             okm.clear();
-            return Err(DecryptError::DecryptFailure);
-        }
-        let cipher = Aes256CbcDec::new(&dk, &iv);
-        if let Ok(pt) = cipher.decrypt_padded_vec_mut::<Pkcs7>(&ct[..ct_len]) {
-            okm.clear();
-            Ok(pt)
+            Err(DecryptError::DecryptFailure(format!("{err}").into()))
         } else {
             okm.clear();
-            Err(DecryptError::DecryptFailure)
+            Ok(pt)
         }
     }
 
     fn new_public_key(key: &[u8]) -> Result<Self::PublicKey, DRError> {
         let key: [u8; 32] = key.try_into().map_err(|_| DRError::InvalidKey)?;
-        Ok(PublicKey(x25519_dalek::PublicKey::from(key)))
+        Ok(PublicKey(key))
     }
 
     fn new_root_key(key: &[u8]) -> Result<Self::RootKey, DRError> {
-        let key = GenericArray::<u8, U32>::clone_from_slice(key);
+        let key: [u8; 32] = key.try_into().map_err(|_| DRError::InvalidKey)?;
         Ok(SymmetricKey(key))
     }
 
     fn new_chain_key(key: &[u8]) -> Result<Self::ChainKey, DRError> {
-        let key = GenericArray::<u8, U32>::clone_from_slice(key);
+        let key: [u8; 32] = key.try_into().map_err(|_| DRError::InvalidKey)?;
         Ok(SymmetricKey(key))
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct PublicKey(x25519_dalek::PublicKey);
+pub struct PublicKey([u8; 32]);
 
 impl Eq for PublicKey {}
 
 impl PartialEq for PublicKey {
     fn eq(&self, other: &PublicKey) -> bool {
-        self.0.as_bytes() == other.0.as_bytes()
+        self.0 == other.0
     }
 }
 
 impl Hash for PublicKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.as_bytes().hash(state);
+        self.0.hash(state);
     }
 }
 
-impl<'a> From<&'a x25519_dalek::StaticSecret> for PublicKey {
-    fn from(private: &'a x25519_dalek::StaticSecret) -> PublicKey {
-        PublicKey(x25519_dalek::PublicKey::from(private))
+// Implementation for converting an X25519 PrivateKey to PublicKey
+impl<'a> From<&'a libcrux_ecdh::X25519PrivateKey> for PublicKey {
+    fn from(private_key: &'a libcrux_ecdh::X25519PrivateKey) -> PublicKey {
+        // Use a match statement to handle the enum variant
+        match private_key {
+            // If the private key is the X25519 variant
+            libcrux_ecdh::X25519PrivateKey(private_key_bytes) => {
+                // Call the libcrux function to derive the public key
+                let public_key_bytes = libcrux_ecdh::secret_to_public(
+                    libcrux_ecdh::Algorithm::X25519,
+                    private_key_bytes,
+                )
+                .expect("Failed to convert X25519 PrivateKey");
+                // Wrap the resulting bytes in your PublicKey struct
+                PublicKey(
+                    public_key_bytes
+                        .try_into()
+                        .expect("Failed to convert X25519 PrivateKey"),
+                )
+            }
+            // Handle all other possible variants (e.g., Kyber, PQC)
+            // This is necessary because the match must be exhaustive.
+            // but in this implementation, it is here for example because
+            // `X25519PrivateKey`` is the only possibility
+            #[allow(unreachable_patterns)]
+            _ => {
+                // In a production environment, you might want to return
+                // a Result<PublicKey, E> instead of panicking, but for a
+                // simple `From` trait, panicking on unexpected input is common.
+                panic!("Cannot convert non-X25519 PrivateKey to PublicKey");
+            }
+        }
     }
 }
 
 impl<'a> From<&'a [u8; 32]> for PublicKey {
     fn from(public_key: &'a [u8; 32]) -> PublicKey {
-        PublicKey(x25519_dalek::PublicKey::from(*public_key))
+        PublicKey(*public_key)
     }
 }
 
 impl AsRef<[u8]> for PublicKey {
     fn as_ref(&self) -> &[u8] {
-        self.0.as_bytes()
+        &self.0
     }
 }
 
 pub struct KeyPair {
-    private: x25519_dalek::StaticSecret,
+    private: Vec<u8>,
     public: PublicKey,
 }
 
@@ -199,8 +269,7 @@ impl fmt::Debug for KeyPair {
         write!(
             f,
             "KeyPair {{ private (bytes): {:?}, public: {:?} }}",
-            self.private.to_bytes(),
-            self.public
+            self.private, self.public
         )
     }
 
@@ -217,9 +286,11 @@ impl fmt::Debug for KeyPair {
 impl dr::KeyPair for KeyPair {
     type PublicKey = PublicKey;
 
-    fn new<R: CryptoRng + RngCore>(rng: &mut R) -> KeyPair {
-        let private = x25519_dalek::StaticSecret::random_from_rng(rng);
-        let public = PublicKey::from(&private);
+    fn new<R: CryptoRng + rand::Rng>(rng: &mut R) -> KeyPair {
+        let (private, public) =
+            libcrux_ecdh::key_gen(libcrux_ecdh::Algorithm::X25519, rng).unwrap();
+        let public: [u8; 32] = public.try_into().unwrap();
+        let public = PublicKey::from(&public);
         KeyPair { private, public }
     }
 
@@ -228,7 +299,7 @@ impl dr::KeyPair for KeyPair {
     }
 
     fn private_bytes(&self) -> Vec<u8> {
-        self.private.to_bytes().to_vec()
+        self.private.clone()
     }
 
     fn new_from_bytes(private: &[u8], public: &[u8]) -> Result<Self, DRError>
@@ -238,14 +309,14 @@ impl dr::KeyPair for KeyPair {
         let private: [u8; 32] = private.try_into().map_err(|_| DRError::InvalidKey)?;
         let public: [u8; 32] = public.try_into().map_err(|_| DRError::InvalidKey)?;
         Ok(KeyPair {
-            private: x25519_dalek::StaticSecret::from(private),
+            private: private.to_vec(),
             public: PublicKey::from(&public),
         })
     }
 }
 
 #[derive(Default, Clone, Hash, PartialEq, Eq)]
-pub struct SymmetricKey(GenericArray<u8, U32>);
+pub struct SymmetricKey([u8; 32]);
 
 impl fmt::Debug for SymmetricKey {
     #[cfg(debug_assertions)]
@@ -256,6 +327,12 @@ impl fmt::Debug for SymmetricKey {
     #[cfg(not(debug_assertions))]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "SymmetricKey(<hidden bytes>)")
+    }
+}
+
+impl<'a> From<&'a [u8; 32]> for SymmetricKey {
+    fn from(symmetric_key: &'a [u8; 32]) -> SymmetricKey {
+        SymmetricKey(*symmetric_key)
     }
 }
 
@@ -276,22 +353,20 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn signal_session() {
-        let mut rng = OsRng;
+    async fn signal_session() -> Result<(), Box<dyn std::error::Error>> {
+        let mut rng = rand::rng(); //OsRng;
         let (ad_a, ad_b) = (b"A2B:SessionID=42", b"B2A:SessionID=42");
 
         // Copy some values (these are usually the outcome of an X3DH key exchange)
         let bobs_prekey = KeyPair::new(&mut rng);
         let bobs_public_prekey = bobs_prekey.public().clone();
-        let shared = SymmetricKey(GenericArray::<u8, U32>::clone_from_slice(
-            b"Output of a X3DH key exchange...",
-        ));
+        let shared = SymmetricKey(*b"Output of a X3DH key exchange...");
 
         // Alice fetches Bob's prekey bundle and completes her side of the X3DH handshake
-        let mut alice = SignalDR::new_alice(&shared, bobs_public_prekey, None, &mut rng);
+        let mut alice = SignalDR::new_alice(&shared, bobs_public_prekey, None, &mut rng)?;
         // Alice creates her first message to Bob
         let pt_a_0 = b"Hello Bob";
-        let (h_a_0, ct_a_0) = alice.ratchet_encrypt(pt_a_0, ad_a, &mut rng).await;
+        let (h_a_0, ct_a_0) = alice.ratchet_encrypt(pt_a_0, ad_a, &mut rng).await?;
         // Alice creates an initial message containing `h_a_0`, `ct_a_0` and other X3DH information
 
         // Bob receives the message and finishes his side of the X3DH handshake
@@ -304,24 +379,24 @@ mod tests {
         // Bob is now fully initialized: both sides can send and receive message
 
         let pt_a_1 = b"I will send this later";
-        let (h_a_1, ct_a_1) = alice.ratchet_encrypt(pt_a_1, ad_a, &mut rng).await;
+        let (h_a_1, ct_a_1) = alice.ratchet_encrypt(pt_a_1, ad_a, &mut rng).await?;
         let pt_b_0 = b"My first reply";
-        let (h_b_0, ct_b_0) = bob.ratchet_encrypt(pt_b_0, ad_b, &mut rng).await;
+        let (h_b_0, ct_b_0) = bob.ratchet_encrypt(pt_b_0, ad_b, &mut rng).await?;
         assert_eq!(
             Ok(Vec::from(&pt_b_0[..])),
             alice.ratchet_decrypt(&h_b_0, &ct_b_0, ad_b).await
         );
         let pt_a_2 = b"What a boring conversation";
-        let (h_a_2, _ct_a_2) = alice.ratchet_encrypt(pt_a_2, ad_a, &mut rng).await;
+        let (h_a_2, _ct_a_2) = alice.ratchet_encrypt(pt_a_2, ad_a, &mut rng).await?;
         let pt_a_3 = b"Don't you agree?";
-        let (h_a_3, ct_a_3) = alice.ratchet_encrypt(pt_a_3, ad_a, &mut rng).await;
+        let (h_a_3, ct_a_3) = alice.ratchet_encrypt(pt_a_3, ad_a, &mut rng).await?;
         assert_eq!(
             Ok(Vec::from(&pt_a_3[..])),
             bob.ratchet_decrypt(&h_a_3, &ct_a_3, ad_a).await
         );
 
         let pt_b_1 = b"Agree with what?";
-        let (h_b_1, ct_b_1) = bob.ratchet_encrypt(pt_b_1, ad_b, &mut rng).await;
+        let (h_b_1, ct_b_1) = bob.ratchet_encrypt(pt_b_1, ad_b, &mut rng).await?;
         assert_eq!(
             Ok(Vec::from(&pt_b_1[..])),
             alice.ratchet_decrypt(&h_b_1, &ct_b_1, ad_b).await
@@ -339,6 +414,8 @@ mod tests {
             .ratchet_decrypt(&h_a_2, b"Incorrect ciphertext", ad_a)
             .await
             .is_err());
+
+        Ok(())
     }
 
     #[test]
@@ -351,13 +428,13 @@ mod tests {
     #[test]
     fn symmetric_key() {
         let key = [8u8; 32];
-        let symmetric_key = SymmetricKey(GenericArray::<u8, U32>::clone_from_slice(&key));
+        let symmetric_key = SymmetricKey(key);
         assert_eq!(symmetric_key.as_ref(), &key);
     }
 
     #[test]
     fn key_pair() {
-        let mut rng = OsRng;
+        let mut rng = rand::rng(); //OsRng;
         let key_pair_ref = KeyPair::new(&mut rng);
         let new_key_pair = KeyPair::new_from_bytes(
             key_pair_ref.private_bytes().as_slice(),
@@ -376,22 +453,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn multiple_messages_key_kdf() {
-        let mut rng = OsRng;
+    async fn multiple_messages_key_kdf() -> Result<(), Box<dyn std::error::Error>> {
+        let mut rng = rand::rng(); //OsRng;
         let (ad_a, _ad_b) = (b"A2B:SessionID=42", b"B2A:SessionID=42");
 
         // Copy some values (these are usually the outcome of an X3DH key exchange)
         let bobs_prekey = KeyPair::new(&mut rng);
         let bobs_public_prekey = bobs_prekey.public().clone();
-        let shared = SymmetricKey(GenericArray::<u8, U32>::clone_from_slice(
-            b"Output of a X3DH key exchange...",
-        ));
+        let shared = SymmetricKey(*b"Output of a X3DH key exchange...");
 
         // Alice fetches Bob's prekey bundle and completes her side of the X3DH handshake
-        let mut alice = SignalDR::new_alice(&shared, bobs_public_prekey, None, &mut rng);
+        let mut alice = SignalDR::new_alice(&shared, bobs_public_prekey, None, &mut rng)?;
         // Alice creates her first message to Bob
         let pt_a_0 = b"Hello Bob";
-        let (h_a_0, ct_a_0) = alice.ratchet_encrypt(pt_a_0, ad_a, &mut rng).await;
+        let (h_a_0, ct_a_0) = alice.ratchet_encrypt(pt_a_0, ad_a, &mut rng).await?;
         // Alice creates an initial message containing `h_a_0`, `ct_a_0` and other X3DH information
 
         // Bob receives the message and finishes his side of the X3DH handshake
@@ -406,11 +481,11 @@ mod tests {
         // we will now send multiple messages without receiving a response.
         // this will cause the kdf function to be used instead of updating the root key
         let pt_a_1 = b"I will send a first message";
-        let (h_a_1, ct_a_1) = alice.ratchet_encrypt(pt_a_1, ad_a, &mut rng).await;
+        let (h_a_1, ct_a_1) = alice.ratchet_encrypt(pt_a_1, ad_a, &mut rng).await?;
         let pt_a_2 = b"I will send a second message";
-        let (h_a_2, ct_a_2) = alice.ratchet_encrypt(pt_a_2, ad_a, &mut rng).await;
+        let (h_a_2, ct_a_2) = alice.ratchet_encrypt(pt_a_2, ad_a, &mut rng).await?;
         let pt_a_3 = b"I will send a third message";
-        let (h_a_3, ct_a_3) = alice.ratchet_encrypt(pt_a_3, ad_a, &mut rng).await;
+        let (h_a_3, ct_a_3) = alice.ratchet_encrypt(pt_a_3, ad_a, &mut rng).await?;
 
         assert_eq!(
             Ok(Vec::from(&pt_a_1[..])),
@@ -424,5 +499,6 @@ mod tests {
             Ok(Vec::from(&pt_a_3[..])),
             bob.ratchet_decrypt(&h_a_3, &ct_a_3, ad_a).await
         );
+        Ok(())
     }
 }
